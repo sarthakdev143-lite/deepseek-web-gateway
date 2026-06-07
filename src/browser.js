@@ -2,9 +2,9 @@
 'use strict';
 
 const { chromium } = require('playwright');
-const path         = require('path');
-const config       = require('./config');
-const logger       = require('./logger');
+const path = require('path');
+const config = require('./config');
+const logger = require('./logger');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Selector banks — ordered by likelihood, with fallbacks
@@ -66,9 +66,9 @@ const SEL = {
 
 class DeepSeekBrowser {
   constructor() {
-    this.context  = null;
-    this.page     = null;
-    this._closed  = false;
+    this.context = null;
+    this.page = null;
+    this._closed = false;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -77,11 +77,22 @@ class DeepSeekBrowser {
     logger.info('Launching browser with persistent session...');
 
     const sessionDir = path.resolve(config.SESSION_DIR);
+    const cookiesFile = path.join(sessionDir, 'cookies.json');
+
+    let cookies = [];
+    if (fs.existsSync(cookiesFile)) {
+      try {
+        cookies = JSON.parse(fs.readFileSync(cookiesFile, 'utf8'));
+        logger.success('Loaded saved cookies — attempting silent login...');
+      } catch (e) {
+        logger.warn('Could not load cookies: ' + e.message);
+      }
+    }
 
     this.context = await chromium.launchPersistentContext(sessionDir, {
-      headless      : config.HEADLESS,
-      viewport      : { width: 1280, height: 900 },
-      userAgent     : [
+      headless: config.HEADLESS,
+      viewport: { width: 1366, height: 768 },
+      userAgent: [
         'Mozilla/5.0 (X11; Linux x86_64)',
         'AppleWebKit/537.36 (KHTML, like Gecko)',
         'Chrome/124.0.0.0 Safari/537.36',
@@ -97,16 +108,30 @@ class DeepSeekBrowser {
     });
 
     // Grab existing page or open a new one
-    const pages   = this.context.pages();
-    this.page     = pages.length > 0 ? pages[0] : await this.context.newPage();
+    const pages = this.context.pages();
+    this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
 
     // Mask automation signals
     await this.page.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
+    // Inject saved cookies
+    if (cookies.length > 0) {
+      await this.context.addCookies(cookies);
+      logger.dim(`Injected ${cookies.length} cookies`);
+    }
+
     await this._navigate(config.DEEPSEEK_URL);
-    await this._ensureLoggedIn();
+    const needsLogin = await this._ensureLoggedIn();
+
+    // Save cookies after login
+    if (needsLogin) {
+      const newCookies = await this.context.cookies();
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(cookiesFile, JSON.stringify(newCookies, null, 2), 'utf8');
+      logger.success('Cookies saved for next run');
+    }
 
     logger.success('Browser ready!');
   }
@@ -114,7 +139,7 @@ class DeepSeekBrowser {
   async close() {
     if (this._closed) return;
     this._closed = true;
-    try { await this.context?.close(); } catch {}
+    try { await this.context?.close(); } catch { }
   }
 
   // ── Navigation ─────────────────────────────────────────────────────────────
@@ -140,9 +165,9 @@ class DeepSeekBrowser {
             logger.dim('Started new chat session');
             return;
           }
-        } catch {}
+        } catch { }
       }
-    } catch {}
+    } catch { }
 
     // Fallback: navigate to home which usually opens a fresh chat
     await this._navigate(config.DEEPSEEK_URL);
@@ -187,8 +212,8 @@ class DeepSeekBrowser {
 
   async _waitForEnter() {
     return new Promise(resolve => {
-      const stdin   = process.stdin;
-      const wasRaw  = stdin.isRaw;
+      const stdin = process.stdin;
+      const wasRaw = stdin.isRaw;
       const wasPaused = !stdin.readable;
 
       if (stdin.isTTY) stdin.setRawMode(false);
@@ -199,7 +224,7 @@ class DeepSeekBrowser {
         if (s.includes('\n') || s.includes('\r')) {
           stdin.removeListener('data', handler);
           if (stdin.isTTY && wasRaw) stdin.setRawMode(true);
-          if (wasPaused)            stdin.pause();
+          if (wasPaused) stdin.pause();
           resolve();
         }
       };
@@ -231,7 +256,7 @@ class DeepSeekBrowser {
         element.focus();
         // Select all and delete
         document.execCommand('selectAll', false, null);
-        document.execCommand('delete',    false, null);
+        document.execCommand('delete', false, null);
         // Insert text (fires proper input events)
         document.execCommand('insertText', false, content);
         // Belt-and-suspenders: fire input event manually
@@ -256,10 +281,10 @@ class DeepSeekBrowser {
       try {
         const el = await this.page.waitForSelector(sel, { timeout: 4_000, state: 'visible' });
         if (!el) continue;
-        const tagName          = await el.evaluate(e => e.tagName.toLowerCase());
+        const tagName = await el.evaluate(e => e.tagName.toLowerCase());
         const isContentEditable = await el.evaluate(e => e.isContentEditable);
         return { el, isTextarea: tagName === 'textarea' && !isContentEditable };
-      } catch {}
+      } catch { }
     }
     throw new Error(
       'Cannot find the DeepSeek chat input box.\n' +
@@ -277,7 +302,7 @@ class DeepSeekBrowser {
           await el.click();
           return true;
         }
-      } catch {}
+      } catch { }
     }
     return false;
   }
@@ -295,13 +320,13 @@ class DeepSeekBrowser {
    *     no stop/loading indicator is visible → done.
    */
   async waitForResponse() {
-    const timeout     = config.RESPONSE_TIMEOUT;
+    const timeout = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
-    const start       = Date.now();
+    const start = Date.now();
 
     // ── Phase 1: wait for a new message to appear ──────────────────────────
     const initialCount = await this._getMessageCount();
-    let   appeared     = false;
+    let appeared = false;
 
     while (Date.now() - start < 12_000) {
       const count = await this._getMessageCount();
@@ -312,15 +337,15 @@ class DeepSeekBrowser {
     if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
 
     // ── Phase 2: wait for text to stabilise ───────────────────────────────
-    let lastText    = '';
+    let lastText = '';
     let stableStart = null;
-    let dotCount    = 0;
+    let dotCount = 0;
 
     while (Date.now() - start < timeout) {
       const text = await this._extractLastMessage();
 
       if (text !== lastText) {
-        lastText    = text;
+        lastText = text;
         stableStart = null;
       } else if (text.length > 0) {
         if (!stableStart) stableStart = Date.now();
@@ -390,7 +415,7 @@ class DeepSeekBrowser {
           if (tag === 'pre') {
             const codeEl = node.querySelector('code');
             if (codeEl) {
-              const cls  = codeEl.className || '';
+              const cls = codeEl.className || '';
               const lang = (cls.match(/language-(\S+)/) || [])[1] || '';
               const body = codeEl.textContent || '';
               result += '\n```' + lang + '\n' + body + '\n```\n';
@@ -412,7 +437,7 @@ class DeepSeekBrowser {
 
           for (const child of node.childNodes) walk(child);
 
-          if (['p','div','li','br','h1','h2','h3','h4','h5','h6'].includes(tag)) {
+          if (['p', 'div', 'li', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)) {
             result += '\n';
           }
         }
@@ -548,17 +573,17 @@ class DeepSeekBrowser {
       });
 
       const inputs = Array.from(document.querySelectorAll('textarea, [contenteditable]')).map(e => ({
-        tag         : e.tagName,
-        id          : e.id || null,
-        class       : e.className?.slice(0, 80) || null,
-        placeholder : e.placeholder || null,
-        editable    : e.isContentEditable,
-        visible     : e.offsetParent !== null,
+        tag: e.tagName,
+        id: e.id || null,
+        class: e.className?.slice(0, 80) || null,
+        placeholder: e.placeholder || null,
+        editable: e.isContentEditable,
+        visible: e.offsetParent !== null,
       }));
 
       return {
-        url    : window.location.href,
-        title  : document.title,
+        url: window.location.href,
+        title: document.title,
         classes: Object.entries(classFreq).sort((a, b) => b[1] - a[1]).slice(0, 40),
         inputs,
       };
