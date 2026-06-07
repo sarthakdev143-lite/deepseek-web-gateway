@@ -1,15 +1,16 @@
-// src/browser.js — Playwright controller for chat.deepseek.com
+// src/browser.js â€” Playwright controller for chat.deepseek.com
 'use strict';
+const fs = require('fs');
 
 const { chromium } = require('playwright');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Selector banks — ordered by likelihood, with fallbacks
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+//  Selector banks â€” ordered by likelihood, with fallbacks
 //  We never depend on a single selector; DeepSeek's UI can change.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const SEL = {
   // Text input where the user types
@@ -32,7 +33,7 @@ const SEL = {
     '[class*="send-button"]',
   ],
 
-  // "Stop generating" button — visible while streaming
+  // "Stop generating" button â€” visible while streaming
   stopButton: [
     'button[aria-label*="Stop" i]',
     '[aria-label*="stop generating" i]',
@@ -60,9 +61,9 @@ const SEL = {
   ],
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //  DeepSeekBrowser class
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class DeepSeekBrowser {
   constructor() {
@@ -71,7 +72,7 @@ class DeepSeekBrowser {
     this._closed = false;
   }
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  // â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async launch() {
     logger.info('Launching browser with persistent session...');
@@ -83,7 +84,7 @@ class DeepSeekBrowser {
     if (fs.existsSync(cookiesFile)) {
       try {
         cookies = JSON.parse(fs.readFileSync(cookiesFile, 'utf8'));
-        logger.success('Loaded saved cookies — attempting silent login...');
+        logger.success('Loaded saved cookies â€” attempting silent login...');
       } catch (e) {
         logger.warn('Could not load cookies: ' + e.message);
       }
@@ -142,7 +143,7 @@ class DeepSeekBrowser {
     try { await this.context?.close(); } catch { }
   }
 
-  // ── Navigation ─────────────────────────────────────────────────────────────
+  // â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async _navigate(url) {
     try {
@@ -174,7 +175,7 @@ class DeepSeekBrowser {
     logger.dim('Navigated to DeepSeek home (new chat)');
   }
 
-  // ── Login handling ─────────────────────────────────────────────────────────
+  // â”€â”€ Login handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async _ensureLoggedIn() {
     await this.page.waitForTimeout(2_000);
@@ -201,12 +202,12 @@ class DeepSeekBrowser {
 
   _printLoginBanner() {
     console.log('');
-    logger.warn('╔══════════════════════════════════════════════╗');
-    logger.warn('║  🔐  LOGIN REQUIRED                          ║');
-    logger.warn('║                                              ║');
-    logger.warn('║  1. Log in to DeepSeek in the browser window ║');
-    logger.warn('║  2. Return here and press  ENTER  to continue║');
-    logger.warn('╚══════════════════════════════════════════════╝');
+    logger.warn('â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—');
+    logger.warn('â•‘  ðŸ”  LOGIN REQUIRED                          â•‘');
+    logger.warn('â•‘                                              â•‘');
+    logger.warn('â•‘  1. Log in to DeepSeek in the browser window â•‘');
+    logger.warn('â•‘  2. Return here and press  ENTER  to continueâ•‘');
+    logger.warn('â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
     console.log('');
   }
 
@@ -233,7 +234,7 @@ class DeepSeekBrowser {
     });
   }
 
-  // ── Sending Messages ───────────────────────────────────────────────────────
+  // â”€â”€ Sending Messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async sendMessage(text) {
     // Find input element
@@ -248,10 +249,10 @@ class DeepSeekBrowser {
     await this.page.waitForTimeout(100);
 
     if (isTextarea) {
-      // Standard textarea — use fill() which is reliable
+      // Standard textarea â€” use fill() which is reliable
       await el.fill(text);
     } else {
-      // contenteditable div — needs execCommand
+      // contenteditable div â€” needs execCommand
       await this.page.evaluate((element, content) => {
         element.focus();
         // Select all and delete
@@ -288,9 +289,9 @@ class DeepSeekBrowser {
     }
     throw new Error(
       'Cannot find the DeepSeek chat input box.\n' +
-      '  → Make sure the page is fully loaded and you are logged in.\n' +
-      '  → Run with --debug to inspect DOM selectors.\n' +
-      '  → Run: node src/calibrate.js to auto-detect selectors.'
+      '  â†’ Make sure the page is fully loaded and you are logged in.\n' +
+      '  â†’ Run with --debug to inspect DOM selectors.\n' +
+      '  â†’ Run: node src/calibrate.js to auto-detect selectors.'
     );
   }
 
@@ -307,7 +308,7 @@ class DeepSeekBrowser {
     return false;
   }
 
-  // ── Waiting for Response ───────────────────────────────────────────────────
+  // â”€â”€ Waiting for Response â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Wait until DeepSeek finishes generating and return the response text.
@@ -317,14 +318,14 @@ class DeepSeekBrowser {
    *  2. Wait until a new message appears (count goes up).
    *  3. Poll the last message text every 500 ms.
    *  4. When the text has not changed for STABLE_DELAY ms AND
-   *     no stop/loading indicator is visible → done.
+   *     no stop/loading indicator is visible â†’ done.
    */
   async waitForResponse() {
     const timeout = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
     const start = Date.now();
 
-    // ── Phase 1: wait for a new message to appear ──────────────────────────
+    // â”€â”€ Phase 1: wait for a new message to appear â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const initialCount = await this._getMessageCount();
     let appeared = false;
 
@@ -334,9 +335,9 @@ class DeepSeekBrowser {
       await this.page.waitForTimeout(400);
     }
 
-    if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
+    if (!appeared) logger.warn('Response may have been delayed â€” continuing to wait...');
 
-    // ── Phase 2: wait for text to stabilise ───────────────────────────────
+    // â”€â”€ Phase 2: wait for text to stabilise â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let lastText = '';
     let stableStart = null;
     let dotCount = 0;
@@ -368,7 +369,7 @@ class DeepSeekBrowser {
     return this._cleanText(final);
   }
 
-  // ── DOM Extraction ─────────────────────────────────────────────────────────
+  // â”€â”€ DOM Extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /** Count how many "response" blocks are visible */
   async _getMessageCount() {
@@ -390,11 +391,11 @@ class DeepSeekBrowser {
     });
   }
 
-  /** Extract the text of the last assistant message — including code blocks */
+  /** Extract the text of the last assistant message â€” including code blocks */
   async _extractLastMessage() {
     return await this.page.evaluate(() => {
 
-      // ── Helper: get all text including code blocks ────────────────────────
+      // â”€â”€ Helper: get all text including code blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Walks the DOM and reconstructs text, re-adding fence markers for code
       // blocks so the parser can recognise tool_call fences even after the
       // browser markdown renderer has converted them to <pre><code> elements.
@@ -410,7 +411,7 @@ class DeepSeekBrowser {
           if (node.nodeType !== Node.ELEMENT_NODE) return;
           const tag = node.tagName.toLowerCase();
 
-          // <pre> wraps a fenced code block — reconstruct the backtick fence
+          // <pre> wraps a fenced code block â€” reconstruct the backtick fence
           // so the parser can match the ```tool_call regex.
           if (tag === 'pre') {
             const codeEl = node.querySelector('code');
@@ -425,7 +426,7 @@ class DeepSeekBrowser {
             return;
           }
 
-          // Inline <code> — skip if inside a <pre> (already handled)
+          // Inline <code> â€” skip if inside a <pre> (already handled)
           if (tag === 'code') {
             const parentTag = node.parentElement && node.parentElement.tagName
               ? node.parentElement.tagName.toLowerCase() : '';
@@ -446,7 +447,7 @@ class DeepSeekBrowser {
         return result.trim();
       }
 
-      // ── Attempt 1: Specific assistant-message selectors ──────────────────
+      // â”€â”€ Attempt 1: Specific assistant-message selectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const directSelectors = [
         '.ds-markdown',
         '[class*="assistant"] [class*="markdown"]',
@@ -466,7 +467,7 @@ class DeepSeekBrowser {
         }
       }
 
-      // ── Attempt 2: Any markdown/prose container ───────────────────────────
+      // â”€â”€ Attempt 2: Any markdown/prose container â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const markdownEls = document.querySelectorAll(
         '[class*="markdown"], [class*="prose"], [class*="rendered"]'
       );
@@ -475,7 +476,7 @@ class DeepSeekBrowser {
         if (t.length > 10) return t;
       }
 
-      // ── Attempt 3: Heuristic — large non-user text blocks ────────────────
+      // â”€â”€ Attempt 3: Heuristic â€” large non-user text blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const allBlocks = Array.from(
         document.querySelectorAll('[class*="message"], [class*="chat-item"], [class*="turn"]')
       );
@@ -538,7 +539,7 @@ class DeepSeekBrowser {
     });
   }
 
-  // ── Text Cleanup ───────────────────────────────────────────────────────────
+  // â”€â”€ Text Cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   _cleanText(text) {
     if (!text) return '';
@@ -555,7 +556,7 @@ class DeepSeekBrowser {
       .trim();
   }
 
-  // ── Debug / Calibration Utilities ─────────────────────────────────────────
+  // â”€â”€ Debug / Calibration Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Dump useful DOM information to stdout.
@@ -589,16 +590,16 @@ class DeepSeekBrowser {
       };
     });
 
-    console.log('\n' + '═'.repeat(60));
+    console.log('\n' + 'â•'.repeat(60));
     console.log('  DOM DEBUG INFO');
-    console.log('═'.repeat(60));
+    console.log('â•'.repeat(60));
     console.log('URL   :', info.url);
     console.log('Title :', info.title);
     console.log('\nInput elements:');
     info.inputs.forEach(i => console.log(' ', JSON.stringify(i)));
     console.log('\nMatching CSS classes (by frequency):');
     info.classes.forEach(([cls, count]) => console.log(`  ${String(count).padStart(3)}x  .${cls}`));
-    console.log('═'.repeat(60) + '\n');
+    console.log('â•'.repeat(60) + '\n');
   }
 
   /** Take a screenshot (for debugging) */
