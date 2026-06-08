@@ -1,4 +1,4 @@
-// src/tools.js â€” All tools available to the AI agent
+// src/tools.js "” All tools available to the AI agent
 'use strict';
 
 const fs = require('fs');
@@ -29,9 +29,9 @@ function logChange(action, filePath, details = '') {
 }
 
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 //  Helpers
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 
 /** Truncate long strings so they don't blow up the context window */
 function truncate(str, max = config.MAX_OUTPUT_LENGTH) {
@@ -41,7 +41,7 @@ function truncate(str, max = config.MAX_OUTPUT_LENGTH) {
   const half = Math.floor(max / 2);
   return (
     s.slice(0, half) +
-    `\n\nâš  [OUTPUT TRUNCATED â€” ${s.length.toLocaleString()} chars total, showing first & last ${half} chars]\n\n` +
+    `\n\nâš  [OUTPUT TRUNCATED "” ${s.length.toLocaleString()} chars total, showing first & last ${half} chars]\n\n` +
     s.slice(-half)
   );
 }
@@ -60,13 +60,13 @@ function formatBytes(bytes) {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 //  Tool definitions
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 
 const TOOLS = {
 
-  // â”€â”€ File Reading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── File Reading ────────────────────────────────────────────────────────────
   read_file: {
     description: 'Read the full contents of a file. Optionally read specific line ranges.',
     parameters: {
@@ -86,7 +86,7 @@ const TOOLS = {
         const s = Math.max(0, (start_line || 1) - 1);
         const e = end_line != null ? end_line : lines.length;
         content = lines.slice(s, e).map((l, i) => `${s + i + 1}: ${l}`).join('\n');
-        return `[${filePath} | lines ${s + 1}â€“${e}]\n${truncate(content)}`;
+        return `[${filePath} | lines ${s + 1}""${e}]\n${truncate(content)}`;
       }
 
       // Add line numbers for large files to help the AI reference lines
@@ -95,11 +95,11 @@ const TOOLS = {
         const numbered = content.split('\n').map((l, i) => `${i + 1}: ${l}`).join('\n');
         return `[${filePath} | ${lineCount} lines]\n${numbered}`;
       }
-      return `[${filePath} | ${lineCount} lines â€” use start_line/end_line to read sections]\n${truncate(content)}`;
+      return `[${filePath} | ${lineCount} lines "” use start_line/end_line to read sections]\n${truncate(content)}`;
     },
   },
 
-  // â”€â”€ File Writing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── File Writing ────────────────────────────────────────────────────────────
   write_file: {
     description: 'Write (create or overwrite) a file with given content. Creates parent directories automatically.',
     parameters: {
@@ -111,11 +111,12 @@ const TOOLS = {
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, content, 'utf8');
       const lineCount = content.split('\n').length;
-      return `âœ“ Wrote ${formatBytes(Buffer.byteLength(content, 'utf8'))} (${lineCount} lines) â†’ ${filePath}`;
+      logChange('write', filePath, `wrote ${lineCount} lines`);
+      return `✓ Wrote ${formatBytes(Buffer.byteLength(content, 'utf8'))} (${lineCount} lines) → ${filePath}`;
     },
   },
 
-  // â”€â”€ Append to File â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Append to File ──────────────────────────────────────────────────────────
   append_to_file: {
     description: 'Append text to the end of an existing file (or create it if missing).',
     parameters: {
@@ -126,11 +127,13 @@ const TOOLS = {
       const abs = resolve(filePath);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.appendFileSync(abs, content, 'utf8');
-      return `âœ“ Appended ${formatBytes(Buffer.byteLength(content, 'utf8'))} to ${filePath}`;
+      const appendedBytes = Buffer.byteLength(content, 'utf8');
+      logChange('append', filePath, `appended ${appendedBytes} bytes`);
+      return `✓ Appended ${formatBytes(appendedBytes)} to ${filePath}`;
     },
   },
 
-  // â”€â”€ Find & Replace in File â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Find & Replace in File ──────────────────────────────────────────────────
   replace_in_file: {
     description: 'Find and replace text in a file. Supports regex patterns.',
     parameters: {
@@ -163,11 +166,12 @@ const TOOLS = {
       ) || []).length;
 
       fs.writeFileSync(abs, content, 'utf8');
-      return `âœ“ Replaced ${count} occurrence(s) of "${find}" in ${filePath}`;
+      logChange('replace', filePath, `replaced ${count} occurrence(s) of "${find}"`);
+      return `✓ Replaced ${count} occurrence(s) of "${find}" in ${filePath}`;
     },
   },
 
-  // â”€â”€ Delete File â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Delete File ─────────────────────────────────────────────────────────────
   delete_file: {
     description: 'Permanently delete a file.',
     parameters: {
@@ -177,11 +181,12 @@ const TOOLS = {
       const abs = resolve(filePath);
       if (!fs.existsSync(abs)) throw new Error(`File not found: ${filePath}`);
       fs.unlinkSync(abs);
-      return `âœ“ Deleted ${filePath}`;
+      logChange('delete', filePath, `deleted file`);
+      return `✓ Deleted ${filePath}`;
     },
   },
 
-  // â”€â”€ List Directory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── List Directory ──────────────────────────────────────────────────────────
   list_directory: {
     description: 'List files and folders in a directory, optionally recursive.',
     parameters: {
@@ -228,21 +233,21 @@ const TOOLS = {
 
       const lines = visible.map(e => {
         if (e.isDirectory()) {
-          return `ðŸ“  ${e.name}/`;
+          return `ðŸ"  ${e.name}/`;
         }
         try {
           const size = fs.statSync(path.join(abs, e.name)).size;
-          return `ðŸ“„  ${e.name}  ${formatBytes(size)}`;
+          return `ðŸ"„  ${e.name}  ${formatBytes(size)}`;
         } catch {
-          return `ðŸ“„  ${e.name}`;
+          return `ðŸ"„  ${e.name}`;
         }
       });
 
-      return `[${dirPath}] â€” ${visible.length} items\n${lines.join('\n')}`;
+      return `[${dirPath}] "” ${visible.length} items\n${lines.join('\n')}`;
     },
   },
 
-  // â”€â”€ Create Directory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Create Directory ────────────────────────────────────────────────────────
   create_directory: {
     description: 'Create a directory (and all necessary parent directories).',
     parameters: {
@@ -251,11 +256,11 @@ const TOOLS = {
     async execute({ path: dirPath }) {
       const abs = resolve(dirPath);
       fs.mkdirSync(abs, { recursive: true });
-      return `âœ“ Created directory: ${dirPath}`;
+      return `✓ Created directory: ${dirPath}`;
     },
   },
 
-  // â”€â”€ Move / Rename â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Move / Rename ───────────────────────────────────────────────────────────
   move_file: {
     description: 'Move or rename a file or directory.',
     parameters: {
@@ -268,11 +273,11 @@ const TOOLS = {
       if (!fs.existsSync(src)) throw new Error(`Source not found: ${source}`);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.renameSync(src, dest);
-      return `âœ“ Moved: ${source} â†’ ${destination}`;
+      return `✓ Moved: ${source} → ${destination}`;
     },
   },
 
-  // â”€â”€ Copy File â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Copy File ───────────────────────────────────────────────────────────────
   copy_file: {
     description: 'Copy a file to a new location.',
     parameters: {
@@ -285,11 +290,11 @@ const TOOLS = {
       if (!fs.existsSync(src)) throw new Error(`Source not found: ${source}`);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(src, dest);
-      return `âœ“ Copied: ${source} â†’ ${destination}`;
+      return `✓ Copied: ${source} → ${destination}`;
     },
   },
 
-  // â”€â”€ File Info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── File Info ───────────────────────────────────────────────────────────────
   get_file_info: {
     description: 'Get metadata about a file or directory (size, modified date, line count, etc.).',
     parameters: {
@@ -317,7 +322,7 @@ const TOOLS = {
     },
   },
 
-  // â”€â”€ Run Command â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Run Command ─────────────────────────────────────────────────────────────
   run_command: {
     description: 'Execute a shell command and return its output. Runs in the working directory by default.',
     parameters: {
@@ -352,7 +357,7 @@ const TOOLS = {
     },
   },
 
-  // â”€â”€ Find Files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Find Files ──────────────────────────────────────────────────────────────
   find_files: {
     description: 'Search for files by name pattern (glob-style, e.g. "*.js", "test_*").',
     parameters: {
@@ -398,24 +403,9 @@ const TOOLS = {
       const output = results.join('\n').substring(0, 8000);
       return output || `No matches found for: ${pattern}`;
     },
-    async execute({ pattern, directory = '.', file_pattern, case_sensitive = false, context_lines = 2 }) {
-      const dir = resolve(directory);
-      const flags = case_sensitive ? '' : '-i';
-      const include = file_pattern ? `--include="${file_pattern}"` : '';
-      const ctx = context_lines > 0 ? `-C ${context_lines}` : '';
-      const cmd = `grep -rn ${flags} ${ctx} ${include} "${pattern}" "${dir}" --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist 2>/dev/null | head -150`;
-
-      try {
-        const result = execSync(cmd, { encoding: 'utf8' }).trim();
-        return truncate(result) || `No matches found for: ${pattern}`;
-      } catch (err) {
-        if (err.status === 1) return `No matches found for: ${pattern}`;
-        throw err;
-      }
-    },
   },
 
-  // â”€â”€ Fetch URL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Fetch URL ───────────────────────────────────────────────────────────────
   read_url: {
     description: 'Fetch the text content of a URL (useful for reading documentation, APIs, etc.).',
     parameters: {
@@ -457,9 +447,9 @@ const TOOLS = {
     },
   },
 
-  // â”€â”€ Write Multiple Files (batch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Write Multiple Files (batch) ────────────────────────────────────────────
   write_files: {
-    description: 'Write multiple files at once â€” useful for scaffolding projects.',
+    description: 'Write multiple files at once "” useful for scaffolding projects.',
     parameters: {
       files: {
         type: 'array',
@@ -474,7 +464,7 @@ const TOOLS = {
         const abs = resolve(filePath);
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         fs.writeFileSync(abs, content, 'utf8');
-        results.push(`âœ“ ${filePath}`);
+        results.push(`✓ ${filePath}`);
       }
       return `Wrote ${results.length} files:\n${results.join('\n')}`;
     },
@@ -498,9 +488,9 @@ const TOOLS = {
 
 };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 //  Generate tool docs for the system prompt
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 function getToolDescriptions() {
   return Object.entries(TOOLS).map(([name, tool]) => {
     const paramLines = Object.entries(tool.parameters || {}).map(([pName, p]) =>
@@ -511,9 +501,9 @@ function getToolDescriptions() {
   }).join('\n\n');
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 //  Execute a tool by name
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────
 async function executeTool(name, args) {
   const tool = TOOLS[name];
   if (!tool) {

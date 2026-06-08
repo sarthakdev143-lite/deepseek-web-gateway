@@ -1,4 +1,4 @@
-// src/browser.js â€” Playwright controller for chat.deepseek.com
+// src/browser.js — Playwright controller for chat.deepseek.com
 'use strict';
 const fs = require('fs');
 
@@ -7,10 +7,10 @@ const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-//  Selector banks â€” ordered by likelihood, with fallbacks
+// ─────────────────────────────────────────────────────────────────────────────
+//  Selector banks — ordered by likelihood, with fallbacks
 //  We never depend on a single selector; DeepSeek's UI can change.
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
 const SEL = {
   // Text input where the user types
@@ -33,7 +33,7 @@ const SEL = {
     '[class*="send-button"]',
   ],
 
-  // "Stop generating" button â€” visible while streaming
+  // "Stop generating" button — visible while streaming
   stopButton: [
     'button[aria-label*="Stop" i]',
     '[aria-label*="stop generating" i]',
@@ -61,9 +61,9 @@ const SEL = {
   ],
 };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 //  DeepSeekBrowser class
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
 class DeepSeekBrowser {
   constructor() {
@@ -72,7 +72,7 @@ class DeepSeekBrowser {
     this._closed = false;
   }
 
-  // â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async launch() {
     logger.info('Launching browser with persistent session...');
@@ -84,7 +84,7 @@ class DeepSeekBrowser {
     if (fs.existsSync(cookiesFile)) {
       try {
         cookies = JSON.parse(fs.readFileSync(cookiesFile, 'utf8'));
-        logger.success('Loaded saved cookies â€” attempting silent login...');
+        logger.success('Loaded saved cookies — attempting silent login...');
       } catch (e) {
         logger.warn('Could not load cookies: ' + e.message);
       }
@@ -143,7 +143,7 @@ class DeepSeekBrowser {
     try { await this.context?.close(); } catch { }
   }
 
-  // â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Navigation ─────────────────────────────────────────────────────────────
 
   async _navigate(url) {
     try {
@@ -175,7 +175,7 @@ class DeepSeekBrowser {
     logger.dim('Navigated to DeepSeek home (new chat)');
   }
 
-  // â”€â”€ Login handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Login handling ─────────────────────────────────────────────────────────
 
   async _ensureLoggedIn() {
     await this.page.waitForTimeout(2_000);
@@ -204,12 +204,12 @@ class DeepSeekBrowser {
 
   _printLoginBanner() {
     console.log('');
-    logger.warn('â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—');
-    logger.warn('â•‘  ðŸ”  LOGIN REQUIRED                          â•‘');
-    logger.warn('â•‘                                              â•‘');
-    logger.warn('â•‘  1. Log in to DeepSeek in the browser window â•‘');
-    logger.warn('â•‘  2. Return here and press  ENTER  to continueâ•‘');
-    logger.warn('â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+    logger.warn('╔══════════════════════════════════════════════╗');
+    logger.warn('║  🔐  LOGIN REQUIRED                          ║');
+    logger.warn('║                                              ║');
+    logger.warn('║  1. Log in to DeepSeek in the browser window ║');
+    logger.warn('║  2. Return here and press  ENTER  to continue║');
+    logger.warn('╚══════════════════════════════════════════════╝');
     console.log('');
   }
 
@@ -236,7 +236,7 @@ class DeepSeekBrowser {
     });
   }
 
-  // â”€â”€ Sending Messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Sending Messages ───────────────────────────────────────────────────────
 
   async sendMessage(text) {
     // Find input element
@@ -251,10 +251,10 @@ class DeepSeekBrowser {
     await this.page.waitForTimeout(100);
 
     if (isTextarea) {
-      // Standard textarea â€” use fill() which is reliable
+      // Standard textarea — use fill() which is reliable
       await el.fill(text);
     } else {
-      // contenteditable div â€” needs execCommand
+      // contenteditable div — needs execCommand
       await this.page.evaluate((element, content) => {
         element.focus();
         // Select all and delete
@@ -291,9 +291,9 @@ class DeepSeekBrowser {
     }
     throw new Error(
       'Cannot find the DeepSeek chat input box.\n' +
-      '  â†’ Make sure the page is fully loaded and you are logged in.\n' +
-      '  â†’ Run with --debug to inspect DOM selectors.\n' +
-      '  â†’ Run: node src/calibrate.js to auto-detect selectors.'
+      '  → Make sure the page is fully loaded and you are logged in.\n' +
+      '  → Run with --debug to inspect DOM selectors.\n' +
+      '  → Run: node src/calibrate.js to auto-detect selectors.'
     );
   }
 
@@ -310,7 +310,7 @@ class DeepSeekBrowser {
     return false;
   }
 
-  // â”€â”€ Waiting for Response â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Waiting for Response ───────────────────────────────────────────────────
 
   /**
    * Wait until DeepSeek finishes generating and return the response text.
@@ -320,14 +320,14 @@ class DeepSeekBrowser {
    *  2. Wait until a new message appears (count goes up).
    *  3. Poll the last message text every 500 ms.
    *  4. When the text has not changed for STABLE_DELAY ms AND
-   *     no stop/loading indicator is visible â†’ done.
+   *     no stop/loading indicator is visible → done.
    */
   async waitForResponse() {
     const timeout = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
     const start = Date.now();
 
-    // â”€â”€ Phase 1: wait for a new message to appear â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Phase 1: wait for a new message to appear ──────────────────────────
     const initialCount = await this._getMessageCount();
     let appeared = false;
 
@@ -337,9 +337,9 @@ class DeepSeekBrowser {
       await this.page.waitForTimeout(400);
     }
 
-    if (!appeared) logger.warn('Response may have been delayed â€” continuing to wait...');
+    if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
 
-    // â”€â”€ Phase 2: wait for text to stabilise â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Phase 2: wait for text to stabilise ───────────────────────────────
     let lastText = '';
     let stableStart = null;
     let dotCount = 0;
@@ -371,7 +371,7 @@ class DeepSeekBrowser {
     return this._cleanText(final);
   }
 
-  // â”€â”€ DOM Extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── DOM Extraction ─────────────────────────────────────────────────────────
 
   /** Count how many "response" blocks are visible */
   async _getMessageCount() {
@@ -393,11 +393,11 @@ class DeepSeekBrowser {
     });
   }
 
-  /** Extract the text of the last assistant message â€” including code blocks */
+  /** Extract the text of the last assistant message — including code blocks */
   async _extractLastMessage() {
     return await this.page.evaluate(() => {
 
-      // â”€â”€ Helper: get all text including code blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Helper: get all text including code blocks ────────────────────────
       // Walks the DOM and reconstructs text, re-adding fence markers for code
       // blocks so the parser can recognise tool_call fences even after the
       // browser markdown renderer has converted them to <pre><code> elements.
@@ -413,7 +413,7 @@ class DeepSeekBrowser {
           if (node.nodeType !== Node.ELEMENT_NODE) return;
           const tag = node.tagName.toLowerCase();
 
-          // <pre> wraps a fenced code block â€” reconstruct the backtick fence
+          // <pre> wraps a fenced code block — reconstruct the backtick fence
           // so the parser can match the ```tool_call regex.
           if (tag === 'pre') {
             const codeEl = node.querySelector('code');
@@ -428,7 +428,7 @@ class DeepSeekBrowser {
             return;
           }
 
-          // Inline <code> â€” skip if inside a <pre> (already handled)
+          // Inline <code> — skip if inside a <pre> (already handled)
           if (tag === 'code') {
             const parentTag = node.parentElement && node.parentElement.tagName
               ? node.parentElement.tagName.toLowerCase() : '';
@@ -449,7 +449,7 @@ class DeepSeekBrowser {
         return result.trim();
       }
 
-      // â”€â”€ Attempt 1: Specific assistant-message selectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Attempt 1: Specific assistant-message selectors ──────────────────
       const directSelectors = [
         '.ds-markdown',
         '[class*="assistant"] [class*="markdown"]',
@@ -469,7 +469,7 @@ class DeepSeekBrowser {
         }
       }
 
-      // â”€â”€ Attempt 2: Any markdown/prose container â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Attempt 2: Any markdown/prose container ───────────────────────────
       const markdownEls = document.querySelectorAll(
         '[class*="markdown"], [class*="prose"], [class*="rendered"]'
       );
@@ -478,7 +478,7 @@ class DeepSeekBrowser {
         if (t.length > 10) return t;
       }
 
-      // â”€â”€ Attempt 3: Heuristic â€” large non-user text blocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Attempt 3: Heuristic — large non-user text blocks ────────────────
       const allBlocks = Array.from(
         document.querySelectorAll('[class*="message"], [class*="chat-item"], [class*="turn"]')
       );
@@ -541,7 +541,7 @@ class DeepSeekBrowser {
     });
   }
 
-  // â”€â”€ Text Cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Text Cleanup ───────────────────────────────────────────────────────────
 
   _cleanText(text) {
     if (!text) return '';
@@ -554,7 +554,7 @@ class DeepSeekBrowser {
       .trim();
   }
 
-  // â”€â”€ Debug / Calibration Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Debug / Calibration Utilities ─────────────────────────────────────────
 
   /**
    * Dump useful DOM information to stdout.
@@ -588,16 +588,16 @@ class DeepSeekBrowser {
       };
     });
 
-    console.log('\n' + 'â•'.repeat(60));
+    console.log('\n' + '═'.repeat(60));
     console.log('  DOM DEBUG INFO');
-    console.log('â•'.repeat(60));
+    console.log('═'.repeat(60));
     console.log('URL   :', info.url);
     console.log('Title :', info.title);
     console.log('\nInput elements:');
     info.inputs.forEach(i => console.log(' ', JSON.stringify(i)));
     console.log('\nMatching CSS classes (by frequency):');
     info.classes.forEach(([cls, count]) => console.log(`  ${String(count).padStart(3)}x  .${cls}`));
-    console.log('â•'.repeat(60) + '\n');
+    console.log('═'.repeat(60) + '\n');
   }
 
   /** Take a screenshot (for debugging) */
@@ -607,112 +607,39 @@ class DeepSeekBrowser {
   }
 }
 
-
 // ── Unicode Mojibake Sanitizer ─────────────────────────────────────────
 // Fixes common UTF-8 bytes misinterpreted as Windows-1252 / ISO-8859-1.
 function sanitizeUnicode(text) {
   if (!text) return '';
-  var map = {};
-  map["â€œ"] = "“";
-  map["â€"] = "”";
-  map["â€˜"] = "‘";
-  map["â€™"] = "’";
-  map["â€”"] = "—";
-  map["â€“"] = "–";
-  map["â€¦"] = "…";
-  map["â€¢"] = "•";
-  map["â€°"] = "‰";
-  map["â€¹"] = "‹";
-  map["â€º"] = "›";
-  map["â€ž"] = "„";
-  map["â€¡"] = "‡";
-  map["â„¢"] = "™";
-  map["Â©"] = "©";
-  map["Â®"] = "®";
-  map["Â°"] = "°";
-  map["Â±"] = "±";
-  map["Â²"] = "²";
-  map["Â³"] = "³";
-  map["Âµ"] = "µ";
-  map["Â¶"] = "¶";
-  map["Â·"] = "·";
-  map["Â¹"] = "¹";
-  map["Â¼"] = "¼";
-  map["Â½"] = "½";
-  map["Â¾"] = "¾";
-  map["Â¿"] = "¿";
-  map["Ã"] = "À";
-  map["Ã"] = "Á";
-  map["Ã"] = "Â";
-  map["Ã"] = "Ã";
-  map["Ã"] = "Ä";
-  map["Ã"] = "Å";
-  map["Ã"] = "Æ";
-  map["Ã"] = "Ç";
-  map["Ã"] = "È";
-  map["Ã"] = "É";
-  map["Ã"] = "Ê";
-  map["Ã"] = "Ë";
-  map["Ã"] = "Ì";
-  map["Ã"] = "Í";
-  map["Ã"] = "Î";
-  map["Ã"] = "Ï";
-  map["Ã"] = "Ð";
-  map["Ã"] = "Ñ";
-  map["Ã"] = "Ò";
-  map["Ã"] = "Ó";
-  map["Ã"] = "Ô";
-  map["Ã"] = "Õ";
-  map["Ã"] = "Ö";
-  map["Ã"] = "×";
-  map["Ã"] = "Ø";
-  map["Ã"] = "Ù";
-  map["Ã"] = "Ú";
-  map["Ã"] = "Û";
-  map["Ã"] = "Ü";
-  map["Ã"] = "Ý";
-  map["Ã"] = "Þ";
-  map["Ã"] = "ß";
-  map["Ã "] = "à";
-  map["Ã¡"] = "á";
-  map["Ã¢"] = "â";
-  map["Ã£"] = "ã";
-  map["Ã¤"] = "ä";
-  map["Ã¥"] = "å";
-  map["Ã¦"] = "æ";
-  map["Ã§"] = "ç";
-  map["Ã¨"] = "è";
-  map["Ã©"] = "é";
-  map["Ãª"] = "ê";
-  map["Ã«"] = "ë";
-  map["Ã¬"] = "ì";
-  map["Ã­"] = "í";
-  map["Ã®"] = "î";
-  map["Ã¯"] = "ï";
-  map["Ã°"] = "ð";
-  map["Ã±"] = "ñ";
-  map["Ã²"] = "ò";
-  map["Ã³"] = "ó";
-  map["Ã´"] = "ô";
-  map["Ãµ"] = "õ";
-  map["Ã¶"] = "ö";
-  map["Ã·"] = "÷";
-  map["Ã¸"] = "ø";
-  map["Ã¹"] = "ù";
-  map["Ãº"] = "ú";
-  map["Ã»"] = "û";
-  map["Ã¼"] = "ü";
-  map["Ã½"] = "ý";
-  map["Ã¾"] = "þ";
-  map["Ã¿"] = "ÿ";
-  map["Å“"] = "œ";
-  map["Å”"] = "Œ";
-  map["Å¸"] = "Ÿ";
-  map["Ë†"] = "ˆ";
-
-  var keys = Object.keys(map);
-  keys.sort(function(a, b) { return b.length - a.length; });
-  var pattern = new RegExp(keys.map(function(k) { return k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|"), "g");
-  return text.replace(pattern, function(m) { return map[m] || m; });
+  const map = {
+    "â€œ": "“", "â€": "”", "â€˜": "‘", "â€™": "’",
+    "â€”": "—", "â€“": "–", "â€¦": "…", "â€¢": "•",
+    "â€°": "‰", "â€¹": "‹", "â€º": "›", "â€ž": "„",
+    "â€¡": "‡", "â„¢": "™", "Â©": "©", "Â®": "®",
+    "Â°": "°", "Â±": "±", "Â²": "²", "Â³": "³",
+    "Âµ": "µ", "Â¶": "¶", "Â·": "·", "Â¹": "¹",
+    "Â¼": "¼", "Â½": "½", "Â¾": "¾", "Â¿": "¿",
+    "Ã": "À", "Ã": "Á", "Ã": "Â", "Ã": "Ã",
+    "Ã„": "Ä", "Ã…": "Å", "Ã†": "Æ", "Ã‡": "Ç",
+    "Ãˆ": "È", "Ã‰": "É", "ÃŠ": "Ê", "Ã‹": "Ë",
+    "ÃŒ": "Ì", "Ã": "Í", "ÃŽ": "Î", "Ã": "Ï",
+    "Ã": "Ð", "Ã‘": "Ñ", "Ã’": "Ò", "Ã“": "Ó",
+    "Ã”": "Ô", "Ã•": "Õ", "Ã–": "Ö", "Ã—": "×",
+    "Ã˜": "Ø", "Ã™": "Ù", "Ãš": "Ú", "Ã›": "Û",
+    "Ãœ": "Ü", "Ã": "Ý", "Ãž": "Þ", "ÃŸ": "ß",
+    "Ã ": "à", "Ã¡": "á", "Ã¢": "â", "Ã£": "ã",
+    "Ã¤": "ä", "Ã¥": "å", "Ã¦": "æ", "Ã§": "ç",
+    "Ã¨": "è", "Ã©": "é", "Ãª": "ê", "Ã«": "ë",
+    "Ã¬": "ì", "Ã­": "í", "Ã®": "î", "Ã¯": "ï",
+    "Ã°": "ð", "Ã±": "ñ", "Ã²": "ò", "Ã³": "ó",
+    "Ã´": "ô", "Ãµ": "õ", "Ã¶": "ö", "Ã·": "÷",
+    "Ã¸": "ø", "Ã¹": "ù", "Ãº": "ú", "Ã»": "û",
+    "Ã¼": "ü", "Ã½": "ý", "Ã¾": "þ", "Ã¿": "ÿ",
+    "Å“": "œ", "Å”": "Œ", "Å¸": "Ÿ", "Ë†": "ˆ"
+  };
+  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  return text.replace(pattern, m => map[m] || m);
 }
+
 module.exports = DeepSeekBrowser;

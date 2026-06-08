@@ -14,21 +14,6 @@ function parseResponse(rawText) {
   const text = stripThinkingBlocks(fixUnicode(rawText)).trim();
 
   // ── Strategy 0 (DOM FALLBACK): bare "tool_call\n{ ... }" ─────────────────
-  //
-  //  When the browser markdown renderer converts:
-  //    ```tool_call
-  //    { "name": "write_file", "args": {...} }
-  //    ```
-  //  …into a <pre><code class="language-tool_call"> element, our getFullText()
-  //  now reconstructs the fence.  BUT if that still fails for any reason, this
-  //  strategy catches the raw DOM text which looks like:
-  //
-  //    tool_call
-  //    {
-  //      "name": "write_file",
-  //      "args": { ... }
-  //    }
-  //
   const bareMatch = text.match(/^tool_call\s*\n([\s\S]+)$/i);
   if (bareMatch) {
     const jsonRaw = bareMatch[1].trim();
@@ -50,7 +35,6 @@ function parseResponse(rawText) {
   }
 
   // ── Strategy 1 (PRIMARY): ```tool_call fenced code block ─────────────────
-  //  Our primary format — reconstructed by getFullText() from <pre><code>.
   const fencedMatch = text.match(/```tool_call\s*([\s\S]*?)```/i);
   if (fencedMatch) {
     const raw = fencedMatch[1].trim();
@@ -110,7 +94,6 @@ function parseResponse(rawText) {
   }
 
   // ── Strategy 5: Any JSON object with "name" key anywhere in text ──────────
-  //  Uses a greedy match to find the outermost JSON object (not fragments).
   if (/["'](?:name|tool|function)["']\s*:\s*["'][\w_]+["']/.test(text)) {
     const jsonObj = extractLargestJsonObject(text);
     if (jsonObj) {
@@ -155,7 +138,6 @@ function tryParseToolCall(name, inputRaw, rawText) {
     const args = JSON.parse(inputRaw);
     return { type: 'tool_call', name, args, raw: rawText };
   } catch (e) {
-    // Try to fix common JSON issues
     const fixed = attemptJsonFix(inputRaw);
     if (fixed !== null) {
       return { type: 'tool_call', name, args: fixed, raw: rawText };
@@ -168,7 +150,6 @@ function tryParseToolCall(name, inputRaw, rawText) {
   }
 }
 
-/** Strip ```json ... ``` or ``` ... ``` fences */
 function stripCodeFences(str) {
   return str
     .replace(/^```(?:json)?\s*/i, '')
@@ -176,47 +157,38 @@ function stripCodeFences(str) {
     .trim();
 }
 
-/** Remove DeepSeek R1 thinking blocks */
-// ── Unicode Mojibake Fixer ───────────────────────────────────────────────
-// Repairs common double-encoding artifacts in browser-extracted text.
-// e.g., “â€œ -> ““, “â€” -> “—”
-var UNICODE_FIXES = [];
-(function buildFixes() {
-  // Smart quotes and dashes (â€ + suffix)
-  var pairs = [
-    ["â€œ", "“"], ["â€", "”"],
-    ["â€˜", "‘"], ["â€™", "’"],
-    ["â€”", "—"], ["â€“", "–"],
-    ["â€¦", "…"], ["â€¢", "•"],
-    ["â€°", "‰"], ["â€¹", "‹"],
-    ["â€º", "›"], ["â€ž", "„"],
-    ["â€¡", "‡"], ["â„¢", "™"],
-    ["Â©", "©"], ["Â®", "®"],
-    ["Â°", "°"], ["Â±", "±"],
-    ["Â²", "²"], ["Â³", "³"],
-    ["Âµ", "µ"], ["Â¶", "¶"],
-    ["Â·", "·"], ["Â¹", "¹"],
-    ["Â¼", "¼"], ["Â½", "½"],
-    ["Â¾", "¾"], ["Â¿", "¿"],
-  ];
-  for (var i = 0; i < pairs.length; i++) {
-    UNICODE_FIXES.push([new RegExp(pairs[i][0].replace(/[.*+?^${}()|[]\\]/g, '\\$&'), 'g'), pairs[i][1]]);
-  }
-  // Latin-1 Supplement: Ã-¿ -> À-ÿ
-  for (var j = 0x80; j <= 0xbf; j++) {
-    UNICODE_FIXES.push([
-      new RegExp(String.fromCharCode(0xc3, j), 'g'),
-      String.fromCharCode(0xc0 + (j - 0x80))
-    ]);
-  }
-})();
-
+// ── Unicode Mojibake Fixer (same as browser.js) ─────────────────────────────
 function fixUnicode(text) {
   if (!text) return '';
-  for (var i = 0; i < UNICODE_FIXES.length; i++) {
-    text = text.replace(UNICODE_FIXES[i][0], UNICODE_FIXES[i][1]);
-  }
-  return text;
+  const map = {
+    "â€œ": "“", "â€": "”", "â€˜": "‘", "â€™": "’",
+    "â€”": "—", "â€“": "–", "â€¦": "…", "â€¢": "•",
+    "â€°": "‰", "â€¹": "‹", "â€º": "›", "â€ž": "„",
+    "â€¡": "‡", "â„¢": "™", "Â©": "©", "Â®": "®",
+    "Â°": "°", "Â±": "±", "Â²": "²", "Â³": "³",
+    "Âµ": "µ", "Â¶": "¶", "Â·": "·", "Â¹": "¹",
+    "Â¼": "¼", "Â½": "½", "Â¾": "¾", "Â¿": "¿",
+    "Ã": "À", "Ã": "Á", "Ã": "Â", "Ã": "Ã",
+    "Ã„": "Ä", "Ã…": "Å", "Ã†": "Æ", "Ã‡": "Ç",
+    "Ãˆ": "È", "Ã‰": "É", "ÃŠ": "Ê", "Ã‹": "Ë",
+    "ÃŒ": "Ì", "Ã": "Í", "ÃŽ": "Î", "Ã": "Ï",
+    "Ã": "Ð", "Ã‘": "Ñ", "Ã’": "Ò", "Ã“": "Ó",
+    "Ã”": "Ô", "Ã•": "Õ", "Ã–": "Ö", "Ã—": "×",
+    "Ã˜": "Ø", "Ã™": "Ù", "Ãš": "Ú", "Ã›": "Û",
+    "Ãœ": "Ü", "Ã": "Ý", "Ãž": "Þ", "ÃŸ": "ß",
+    "Ã ": "à", "Ã¡": "á", "Ã¢": "â", "Ã£": "ã",
+    "Ã¤": "ä", "Ã¥": "å", "Ã¦": "æ", "Ã§": "ç",
+    "Ã¨": "è", "Ã©": "é", "Ãª": "ê", "Ã«": "ë",
+    "Ã¬": "ì", "Ã­": "í", "Ã®": "î", "Ã¯": "ï",
+    "Ã°": "ð", "Ã±": "ñ", "Ã²": "ò", "Ã³": "ó",
+    "Ã´": "ô", "Ãµ": "õ", "Ã¶": "ö", "Ã·": "÷",
+    "Ã¸": "ø", "Ã¹": "ù", "Ãº": "ú", "Ã»": "û",
+    "Ã¼": "ü", "Ã½": "ý", "Ã¾": "þ", "Ã¿": "ÿ",
+    "Å“": "œ", "Å”": "Œ", "Å¸": "Ÿ", "Ë†": "ˆ"
+  };
+  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  return text.replace(pattern, m => map[m] || m);
 }
 
 function stripThinkingBlocks(text) {
@@ -226,7 +198,6 @@ function stripThinkingBlocks(text) {
     .trim();
 }
 
-/** Attempt to fix common LLM JSON mistakes */
 function attemptJsonFix(str) {
   try {
     const fixed = str
@@ -238,10 +209,6 @@ function attemptJsonFix(str) {
   }
 }
 
-/**
- * Extract the largest valid JSON object from a string.
- * Uses a bracket-counting approach rather than regex to handle nested objects.
- */
 function extractLargestJsonObject(text) {
   let best = null;
   let bestLen = 0;
@@ -285,7 +252,6 @@ function extractLargestJsonObject(text) {
   return best;
 }
 
-/** Format a tool result for sending back to the AI */
 function formatToolResult(toolName, result, isError = false) {
   const status = isError ? 'ERROR' : 'SUCCESS';
   return [
@@ -295,7 +261,6 @@ function formatToolResult(toolName, result, isError = false) {
   ].join('\n');
 }
 
-/** Check if a response looks like the agent is asking a clarifying question */
 function isAskingQuestion(text) {
   const questionIndicators = [
     /\?(\s*$)/m,
