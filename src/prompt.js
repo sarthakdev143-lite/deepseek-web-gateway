@@ -25,7 +25,7 @@ function buildSystemPrompt() {
   const FENCE = '```';
 
   const lines = [
-    'You are DeepSeek Agent — an expert AI software engineer and coding assistant',
+    'You are Seekcode — an expert AI software engineer and coding assistant',
     'running inside a terminal-based agent framework. You have direct access to the',
     "user's filesystem and can execute shell commands.",
     '',

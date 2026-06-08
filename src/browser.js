@@ -198,6 +198,8 @@ class DeepSeekBrowser {
       await this._waitForEnter();
       await this.page.waitForTimeout(2_000);
     }
+
+    return needsLogin;
   }
 
   _printLoginBanner() {
@@ -544,15 +546,11 @@ class DeepSeekBrowser {
   _cleanText(text) {
     if (!text) return '';
 
-    return text
-      // Strip DeepSeek R1 chain-of-thought blocks
-      .replace(/<think>[\s\S]*?<\/think>\n?/gi, '')
-      // Strip "Thinking..." headers that sometimes prefix responses
-      .replace(/^Thinking\.{0,3}\n[\s\S]*?\n\n/m, '')
-      // Strip copy-code button artifacts like "1CopyRunInsert"
-      .replace(/^\d+(?:Copy|Run|Insert|Edit)\b.*$/gm, '')
-      // Collapse 3+ blank lines into 2
-      .replace(/\n{3,}/g, '\n\n')
+    return sanitizeUnicode(text)
+      .replace(/<think>[\s\S]*?<\/think>\n?/gi, "")
+      .replace(/^Thinking\.{0,3}\n[\s\S]*?\n\n/m, "")
+      .replace(/^\d+(?:Copy|Run|Insert|Edit)\b.*$/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
       .trim();
   }
 
@@ -609,4 +607,112 @@ class DeepSeekBrowser {
   }
 }
 
+
+// ── Unicode Mojibake Sanitizer ─────────────────────────────────────────
+// Fixes common UTF-8 bytes misinterpreted as Windows-1252 / ISO-8859-1.
+function sanitizeUnicode(text) {
+  if (!text) return '';
+  var map = {};
+  map["â€œ"] = "“";
+  map["â€"] = "”";
+  map["â€˜"] = "‘";
+  map["â€™"] = "’";
+  map["â€”"] = "—";
+  map["â€“"] = "–";
+  map["â€¦"] = "…";
+  map["â€¢"] = "•";
+  map["â€°"] = "‰";
+  map["â€¹"] = "‹";
+  map["â€º"] = "›";
+  map["â€ž"] = "„";
+  map["â€¡"] = "‡";
+  map["â„¢"] = "™";
+  map["Â©"] = "©";
+  map["Â®"] = "®";
+  map["Â°"] = "°";
+  map["Â±"] = "±";
+  map["Â²"] = "²";
+  map["Â³"] = "³";
+  map["Âµ"] = "µ";
+  map["Â¶"] = "¶";
+  map["Â·"] = "·";
+  map["Â¹"] = "¹";
+  map["Â¼"] = "¼";
+  map["Â½"] = "½";
+  map["Â¾"] = "¾";
+  map["Â¿"] = "¿";
+  map["Ã"] = "À";
+  map["Ã"] = "Á";
+  map["Ã"] = "Â";
+  map["Ã"] = "Ã";
+  map["Ã"] = "Ä";
+  map["Ã"] = "Å";
+  map["Ã"] = "Æ";
+  map["Ã"] = "Ç";
+  map["Ã"] = "È";
+  map["Ã"] = "É";
+  map["Ã"] = "Ê";
+  map["Ã"] = "Ë";
+  map["Ã"] = "Ì";
+  map["Ã"] = "Í";
+  map["Ã"] = "Î";
+  map["Ã"] = "Ï";
+  map["Ã"] = "Ð";
+  map["Ã"] = "Ñ";
+  map["Ã"] = "Ò";
+  map["Ã"] = "Ó";
+  map["Ã"] = "Ô";
+  map["Ã"] = "Õ";
+  map["Ã"] = "Ö";
+  map["Ã"] = "×";
+  map["Ã"] = "Ø";
+  map["Ã"] = "Ù";
+  map["Ã"] = "Ú";
+  map["Ã"] = "Û";
+  map["Ã"] = "Ü";
+  map["Ã"] = "Ý";
+  map["Ã"] = "Þ";
+  map["Ã"] = "ß";
+  map["Ã "] = "à";
+  map["Ã¡"] = "á";
+  map["Ã¢"] = "â";
+  map["Ã£"] = "ã";
+  map["Ã¤"] = "ä";
+  map["Ã¥"] = "å";
+  map["Ã¦"] = "æ";
+  map["Ã§"] = "ç";
+  map["Ã¨"] = "è";
+  map["Ã©"] = "é";
+  map["Ãª"] = "ê";
+  map["Ã«"] = "ë";
+  map["Ã¬"] = "ì";
+  map["Ã­"] = "í";
+  map["Ã®"] = "î";
+  map["Ã¯"] = "ï";
+  map["Ã°"] = "ð";
+  map["Ã±"] = "ñ";
+  map["Ã²"] = "ò";
+  map["Ã³"] = "ó";
+  map["Ã´"] = "ô";
+  map["Ãµ"] = "õ";
+  map["Ã¶"] = "ö";
+  map["Ã·"] = "÷";
+  map["Ã¸"] = "ø";
+  map["Ã¹"] = "ù";
+  map["Ãº"] = "ú";
+  map["Ã»"] = "û";
+  map["Ã¼"] = "ü";
+  map["Ã½"] = "ý";
+  map["Ã¾"] = "þ";
+  map["Ã¿"] = "ÿ";
+  map["Å“"] = "œ";
+  map["Å”"] = "Œ";
+  map["Å¸"] = "Ÿ";
+  map["Ë†"] = "ˆ";
+
+  var keys = Object.keys(map);
+  keys.sort(function(a, b) { return b.length - a.length; });
+  var pattern = new RegExp(keys.map(function(k) { return k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|"), "g");
+  return text.replace(pattern, function(m) { return map[m] || m; });
+}
 module.exports = DeepSeekBrowser;

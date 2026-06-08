@@ -10,7 +10,8 @@
  *   { type: 'error',     message: string,            raw: string }
  */
 function parseResponse(rawText) {
-  const text = stripThinkingBlocks(rawText).trim();
+  // Sanitize encoding artifacts first, then strip thinking blocks
+  const text = stripThinkingBlocks(fixUnicode(rawText)).trim();
 
   // ── Strategy 0 (DOM FALLBACK): bare "tool_call\n{ ... }" ─────────────────
   //
@@ -176,6 +177,48 @@ function stripCodeFences(str) {
 }
 
 /** Remove DeepSeek R1 thinking blocks */
+// ── Unicode Mojibake Fixer ───────────────────────────────────────────────
+// Repairs common double-encoding artifacts in browser-extracted text.
+// e.g., “â€œ -> ““, “â€” -> “—”
+var UNICODE_FIXES = [];
+(function buildFixes() {
+  // Smart quotes and dashes (â€ + suffix)
+  var pairs = [
+    ["â€œ", "“"], ["â€", "”"],
+    ["â€˜", "‘"], ["â€™", "’"],
+    ["â€”", "—"], ["â€“", "–"],
+    ["â€¦", "…"], ["â€¢", "•"],
+    ["â€°", "‰"], ["â€¹", "‹"],
+    ["â€º", "›"], ["â€ž", "„"],
+    ["â€¡", "‡"], ["â„¢", "™"],
+    ["Â©", "©"], ["Â®", "®"],
+    ["Â°", "°"], ["Â±", "±"],
+    ["Â²", "²"], ["Â³", "³"],
+    ["Âµ", "µ"], ["Â¶", "¶"],
+    ["Â·", "·"], ["Â¹", "¹"],
+    ["Â¼", "¼"], ["Â½", "½"],
+    ["Â¾", "¾"], ["Â¿", "¿"],
+  ];
+  for (var i = 0; i < pairs.length; i++) {
+    UNICODE_FIXES.push([new RegExp(pairs[i][0].replace(/[.*+?^${}()|[]\\]/g, '\\$&'), 'g'), pairs[i][1]]);
+  }
+  // Latin-1 Supplement: Ã-¿ -> À-ÿ
+  for (var j = 0x80; j <= 0xbf; j++) {
+    UNICODE_FIXES.push([
+      new RegExp(String.fromCharCode(0xc3, j), 'g'),
+      String.fromCharCode(0xc0 + (j - 0x80))
+    ]);
+  }
+})();
+
+function fixUnicode(text) {
+  if (!text) return '';
+  for (var i = 0; i < UNICODE_FIXES.length; i++) {
+    text = text.replace(UNICODE_FIXES[i][0], UNICODE_FIXES[i][1]);
+  }
+  return text;
+}
+
 function stripThinkingBlocks(text) {
   return text
     .replace(/<think>[\s\S]*?<\/think>\n?/gi, '')

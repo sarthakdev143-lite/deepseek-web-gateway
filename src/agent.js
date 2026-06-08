@@ -3,7 +3,6 @@
 
 const fs                           = require('fs');
 const path                         = require('path');
-const { execSync }                 = require('child_process');
 const config                       = require('./config');
 const logger                       = require('./logger');
 const DeepSeekBrowser              = require('./browser');
@@ -18,6 +17,7 @@ const { ConversationManager }      = require('./prompt');
 
 class DeepSeekAgent {
   constructor(options = {}) {
+    this.silent = options.silent || false;
     this.browser      = new DeepSeekBrowser();
     this.conversation = new ConversationManager();
     this.options      = options;
@@ -141,7 +141,7 @@ class DeepSeekAgent {
           continue;
         }
 
-        logger.finalOutput(parsed.content);
+        if (!this.silent) logger.finalOutput(parsed.content);
 
         // Optionally save conversation log
         if (this.options.saveLog) {
@@ -221,20 +221,39 @@ class DeepSeekAgent {
 
   _getWorkingDirListing() {
     try {
-      const result = execSync(
-        `find . -maxdepth 3 \\
-          -not -path '*/node_modules/*' \\
-          -not -path '*/.git/*' \\
-          -not -path '*/dist/*' \\
-          -not -path '*/.next/*' \\
-          -not -path '*/build/*' \\
-          -not -name '*.lock' \\
-          | sort | head -80`,
-        { cwd: config.WORKING_DIR, encoding: 'utf8', timeout: 5_000 }
-      ).trim();
-      return result || '(empty directory)';
+      const excluded = new Set(["node_modules", ".git", "dist", ".next", "build"]);
+      const maxEntries = 80;
+      const entries = [];
+
+      function walk(dir, depth) {
+        if (depth > 3 || entries.length >= maxEntries) return;
+        let items;
+        try {
+          items = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        items.sort((a, b) => {
+          if (a.isDirectory() && !b.isDirectory()) return -1;
+          if (!a.isDirectory() && b.isDirectory()) return 1;
+          return a.name.localeCompare(b.name);
+        });
+        for (const item of items) {
+          if (entries.length >= maxEntries) return;
+          if (item.name.startsWith(".") || excluded.has(item.name)) continue;
+          if (item.name.endsWith(".lock")) continue;
+          const relPath = path.relative(config.WORKING_DIR, path.join(dir, item.name));
+          entries.push((item.isDirectory() ? relPath + "/" : relPath));
+          if (item.isDirectory()) {
+            walk(path.join(dir, item.name), depth + 1);
+          }
+        }
+      }
+
+      walk(config.WORKING_DIR, 1);
+      return entries.length > 0 ? entries.join("\n") : "(empty directory)";
     } catch {
-      return '(could not read directory)';
+      return "(could not read directory)";
     }
   }
 

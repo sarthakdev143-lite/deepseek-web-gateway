@@ -11,7 +11,7 @@ let agent = null;
 app.post('/session/create', async (req, res) => {
     try {
         if (agent) await agent.shutdown();
-        agent = new DeepSeekAgent({ saveLog: false });
+        agent = new DeepSeekAgent({ saveLog: false, silent: true });
         await agent.init();
         res.json({ sessionId: 'default', status: 'ready' });
     } catch (err) {
@@ -43,4 +43,14 @@ app.post('/session/:id/close', async (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Gateway HTTP server on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log("═".repeat(55));
+    console.log("  DeepSeek Web Gateway — HTTP API");
+    console.log(`  Server listening on http://localhost:${PORT}`);
+    console.log("  Endpoints:");
+    console.log("    GET  /health               — health check");
+    console.log("    POST /session/create       — create agent session");
+    console.log("    POST /session/:id/chat     — send task prompt");
+    console.log("    POST /session/:id/close    — close session");
+    console.log("═".repeat(55));
+});

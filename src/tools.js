@@ -7,6 +7,27 @@ const { execSync } = require('child_process');
 const http = require('http');
 const https = require('https');
 const config = require('./config');
+// ---------- File change logging ----------
+const LOG_FILE = path.join(process.cwd(), '.seekcode', 'changes.json');
+
+function logChange(action, filePath, details = '') {
+  try {
+    const dir = path.dirname(LOG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    let log = [];
+    if (fs.existsSync(LOG_FILE)) {
+      log = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
+    }
+    log.push({
+      timestamp: new Date().toISOString(),
+      action,
+      file: filePath,
+      details
+    });
+    fs.writeFileSync(LOG_FILE, JSON.stringify(log, null, 2), 'utf8');
+  } catch (e) { /* ignore logging errors */ }
+}
+
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //  Helpers
@@ -343,7 +364,7 @@ const TOOLS = {
       const dir = resolve(directory);
       const flags = case_sensitive ? '' : 'i';
       const results = [];
-      
+
       const walkAndSearch = (currentDir, depth = 0) => {
         if (depth > 10) return;
         try {
@@ -351,10 +372,10 @@ const TOOLS = {
           for (const entry of entries) {
             const fullPath = path.join(currentDir, entry.name);
             if (entry.isDirectory()) {
-              if (['node_modules','.git','dist','.next'].includes(entry.name)) continue;
+              if (['node_modules', '.git', 'dist', '.next'].includes(entry.name)) continue;
               walkAndSearch(fullPath, depth + 1);
             } else if (entry.isFile()) {
-              if (file_pattern && !entry.name.endsWith(file_pattern.replace('*',''))) continue;
+              if (file_pattern && !entry.name.endsWith(file_pattern.replace('*', ''))) continue;
               try {
                 const content = fs.readFileSync(fullPath, 'utf8');
                 const lines = content.split('\n');
@@ -456,6 +477,22 @@ const TOOLS = {
         results.push(`âœ“ ${filePath}`);
       }
       return `Wrote ${results.length} files:\n${results.join('\n')}`;
+    },
+  },
+
+  get_change_log: {
+    description: 'Returns a list of all file changes made during this session.',
+    parameters: {},
+    async execute() {
+      try {
+        if (fs.existsSync(LOG_FILE)) {
+          const log = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
+          return JSON.stringify(log.slice(-50), null, 2);
+        }
+        return 'No changes logged yet.';
+      } catch (e) {
+        return `Error reading change log: ${e.message}`;
+      }
     },
   },
 
