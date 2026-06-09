@@ -40,17 +40,17 @@ async function validateSession(req, res, next) {
     req.session = session;
     
     // Health check and auto-heal
-    if (session.healthMonitor) {
-        const isHealthy = await session.healthMonitor.checkHealth();
-        if (!isHealthy) {
-            logger.warn(`Session ${sessionId} unhealthy - attempting auto-heal`);
-            const healed = await session.healthMonitor.autoHeal();
-            if (!healed) {
-                await sessionManager.destroySession(sessionId);
-                return res.status(503).json({ error: 'Session unhealthy and could not be recovered' });
-            }
-        }
-    }
+    // if (session.healthMonitor) {
+    //     const isHealthy = await session.healthMonitor.checkHealth();
+    //     if (!isHealthy) {
+    //         logger.warn(`Session ${sessionId} unhealthy - attempting auto-heal`);
+    //         const healed = await session.healthMonitor.autoHeal();
+    //         if (!healed) {
+    //             await sessionManager.destroySession(sessionId);
+    //             return res.status(503).json({ error: 'Session unhealthy and could not be recovered' });
+    //         }
+    //     }
+    // }
     
     next();
 }

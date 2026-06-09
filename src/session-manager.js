@@ -47,13 +47,13 @@ class SessionManager {
     this.persistenceDir = path.join(process.cwd(), '.seekcode', 'sessions');
     
     // Monitor memory usage
-    setInterval(() => {
-      const used = process.memoryUsage();
-      if (used.heapUsed > 500 * 1024 * 1024) { // 500MB
-        console.warn(`High memory usage: ${Math.round(used.heapUsed / 1024 / 1024)}MB`);
-        this.pruneOldestSessions();
-      }
-    }, 60000);
+    // setInterval(() => {
+    //   const used = process.memoryUsage();
+    //   if (used.heapUsed > 500 * 1024 * 1024) { // 500MB
+    //     console.warn(`High memory usage: ${Math.round(used.heapUsed / 1024 / 1024)}MB`);
+    //     this.pruneOldestSessions();
+    //   }
+    // }, 60000);
   }
   
   pruneOldestSessions() {
@@ -97,10 +97,10 @@ class SessionManager {
     if (!session) return null;
     
     // Check expiration
-    if (Date.now() - session.lastAccessed > this.sessionTTL) {
-      this.destroySession(sessionId);
-      return null;
-    }
+    // if (Date.now() - session.lastAccessed > this.sessionTTL) {
+    //   this.destroySession(sessionId);
+    //   return null;
+    // }
     
     session.lastAccessed = Date.now();
     return session;
