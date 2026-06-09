@@ -1,7 +1,7 @@
 // src/session-manager.js — Multi-session management with persistence
 'use strict';
 
-const fs = require('fs').promises;
+const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const logger = require('./logger');
@@ -44,6 +44,7 @@ class SessionManager {
     this.sessionTTL = 30 * 60; // 30 minutes
     this.maxSessions = 100;
     this.cleanupInterval = null;
+    this.persistenceDir = path.join(process.cwd(), '.seekcode', 'sessions');
     
     // Monitor memory usage
     setInterval(() => {
