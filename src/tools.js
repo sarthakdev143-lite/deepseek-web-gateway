@@ -1,6 +1,14 @@
+// src/tools.js — All tools available to the AI agent
+
+'use strict';
 
 const fs = require('fs');
 const path = require('path');
+
+const { execSync } = require('child_process');
+const http = require('http');
+const https = require('https');
+const config = require('./config');
 
 async function atomicWriteFile(filePath, content, createBackup = true) {
   const tempPath = filePath + '.tmp.' + Date.now();
@@ -40,19 +48,10 @@ async function atomicWriteFile(filePath, content, createBackup = true) {
   }
 }
 
-// src/tools.js "” All tools available to the AI agent
-'use strict';
-
-const fs = require('fs');
-const path = require('path');
-const { execSync } = require('child_process');
-const http = require('http');
-const https = require('https');
-const config = require('./config');
 // ---------- File change logging ----------
 const LOG_FILE = path.join(process.cwd(), '.seekcode', 'changes.json');
 
-function logChange(action, filePath, details = '') {
+async function logChange(action, filePath, details = '') {
   try {
     const dir = path.dirname(LOG_FILE);
     if (!await fs.promises.access(dir)) await fs.promises.mkdir(dir, { recursive: true });
@@ -69,7 +68,6 @@ function logChange(action, filePath, details = '') {
     await fs.promises.writeFile(LOG_FILE, JSON.stringify(log, null, 2), 'utf8');
   } catch (e) { /* ignore logging errors */ }
 }
-
 
 // ─────────────────────────────────────────────
 //  Helpers
@@ -412,7 +410,7 @@ const TOOLS = {
       const flags = case_sensitive ? '' : 'i';
       const results = [];
 
-      const walkAndSearch = (currentDir, depth = 0) => {
+      const walkAndSearch = async (currentDir, depth = 0) => {
         if (depth > 10) return;
         try {
           const entries = fs.readdirSync(currentDir, { withFileTypes: true });

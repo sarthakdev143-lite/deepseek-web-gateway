@@ -1,10 +1,8 @@
-'use strict';
-const fs = require('fs').promises;
 // src/session-manager.js — Multi-session management with persistence
 'use strict';
 
+const fs = require('fs').promises;
 const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 
@@ -156,7 +154,7 @@ class SessionManager {
     }
   }
 
-  persistSession(sessionId) {
+  async persistSession(sessionId) {
     try {
       await fs.promises.mkdir(this.persistenceDir, { recursive: true });
       const session = this.sessions.get(sessionId);
@@ -175,7 +173,7 @@ class SessionManager {
     }
   }
 
-  deletePersistedSession(sessionId) {
+  async deletePersistedSession(sessionId) {
     try {
       const filePath = path.join(this.persistenceDir, `${sessionId}.json`);
       if (await fs.promises.access(filePath)) {
@@ -186,7 +184,7 @@ class SessionManager {
     }
   }
 
-  loadPersistedSessions() {
+  async loadPersistedSessions() {
     try {
       if (!await fs.promises.access(this.persistenceDir)) return;
       
