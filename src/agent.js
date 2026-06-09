@@ -16,6 +16,25 @@ const { ConversationManager }      = require('./prompt');
 // ─────────────────────────────────────────────
 
 class DeepSeekAgent {
+
+  async runWithTimeout(prompt, timeoutMs = 120000) {
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Operation timed out after ${timeoutMs}ms`)), timeoutMs)
+    );
+    
+    try {
+      return await Promise.race([this.run(prompt), timeoutPromise]);
+    } catch (err) {
+      if (err.message.includes('timed out')) {
+        // Attempt to recover browser state
+        console.warn('Operation timeout - attempting recovery');
+        await this.shutdown().catch(() => {});
+        await this.init();
+      }
+      throw err;
+    }
+  }
+
   constructor(options = {}) {
     this.silent = options.silent || false;
     this.browser      = new DeepSeekBrowser();

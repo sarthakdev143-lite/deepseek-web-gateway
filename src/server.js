@@ -6,6 +6,21 @@ const { HealthMonitor } = require('./health');
 const logger = require('./logger');
 
 const app = express();
+
+// Retry wrapper for session creation
+async function createSessionWithRetry(maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const agent = await createSessionWithRetry();
+      return agent;
+    } catch (err) {
+      logger.warn(`Session creation attempt ${i + 1}/${maxRetries} failed: ${err.message}`);
+      if (i === maxRetries - 1) throw err;
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+}
+
 app.use(express.json());
 
 const sessionManager = new SessionManager();

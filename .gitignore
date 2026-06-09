@@ -4,6 +4,7 @@ node_modules/
 # ── Session data (browser cookies / login) ────
 session/
 .deepseek-session/
+.seekcode
 
 # ── Logs ──────────────────────────────────────
 logs/

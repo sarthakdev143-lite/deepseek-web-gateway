@@ -1,3 +1,45 @@
+
+const fs = require('fs');
+const path = require('path');
+
+async function atomicWriteFile(filePath, content, createBackup = true) {
+  const tempPath = filePath + '.tmp.' + Date.now();
+  const backupPath = filePath + '.backup';
+  
+  try {
+    // Create backup if file exists
+    if (createBackup && fs.existsSync(filePath)) {
+      fs.copyFileSync(filePath, backupPath);
+    }
+    
+    // Write to temp file
+    fs.writeFileSync(tempPath, content, 'utf8');
+    
+    // Atomic rename
+    fs.renameSync(tempPath, filePath);
+    
+    // Cleanup backup on success
+    if (fs.existsSync(backupPath)) {
+      fs.unlinkSync(backupPath);
+    }
+    
+    return { success: true, path: filePath };
+  } catch (err) {
+    // Restore from backup if available
+    if (fs.existsSync(backupPath)) {
+      fs.copyFileSync(backupPath, filePath);
+      fs.unlinkSync(backupPath);
+    }
+    
+    // Cleanup temp file
+    if (fs.existsSync(tempPath)) {
+      fs.unlinkSync(tempPath);
+    }
+    
+    throw new Error(`Atomic write failed: ${err.message}`);
+  }
+}
+
 // src/tools.js "” All tools available to the AI agent
 'use strict';
 

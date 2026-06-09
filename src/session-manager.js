@@ -7,6 +7,37 @@ const path = require('path');
 const logger = require('./logger');
 
 class SessionManager {
+
+  startAutoCleanup(intervalMs = 300000) { // 5 minutes default
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    this.cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      const staleSessions = [];
+      
+      for (const [id, session] of this.sessions.entries()) {
+        const lastActivity = session.lastActivity || session.createdAt;
+        if (now - lastActivity > this.sessionTTL * 1000) {
+          staleSessions.push(id);
+        }
+      }
+      
+      for (const id of staleSessions) {
+        this.destroySession(id).catch(err => {
+          console.error(`Failed to cleanup stale session ${id}: ${err.message}`);
+        });
+      }
+      
+      if (staleSessions.length > 0) {
+        console.log(`Auto-cleaned ${staleSessions.length} stale sessions`);
+      }
+    }, intervalMs);
+    
+    // Ensure cleanup on process exit
+    process.on('beforeExit', () => {
+      if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    });
+  }
+
   constructor() {
     this.sessions = new Map();
     this.persistenceDir = path.join(process.cwd(), '.seekcode', 'sessions');

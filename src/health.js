@@ -6,6 +6,23 @@ const path = require('path');
 const logger = require('./logger');
 
 class HealthMonitor {
+
+  async safePageCheck() {
+    try {
+      if (!this.agent || !this.agent.browser) return false;
+      if (!this.agent.browser.page) {
+        // Attempt to recover missing page
+        logger.warn('Page missing - attempting to recreate');
+        await this.agent.browser.init();
+        return !!this.agent.browser.page;
+      }
+      return true;
+    } catch (err) {
+      logger.warn(`Page check failed: ${err.message}`);
+      return false;
+    }
+  }
+
   constructor(agent) {
     this.agent = agent;
     this.healthStatus = 'unknown';
@@ -21,15 +38,21 @@ class HealthMonitor {
     };
   }
 
+  
   async checkHealth() {
+    const isPageSafe = await this.safePageCheck();
+    if (!isPageSafe) {
+      this.healthStatus = 'unhealthy';
+      return false;
+    }
+    
     try {
-      if (!this.agent || !this.agent.browser || !this.agent.browser.page) {
-        this.healthStatus = 'unhealthy';
-        return false;
-      }
-
-      // Check if page is still alive
-      const title = await this.agent.browser.page.title().catch(() => null);
+      // Safe page title check with timeout
+      const title = await Promise.race([
+        this.agent.browser.page.title(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+      ]).catch(() => null);
+      
       if (!title || title.includes('error') || title.includes('Error')) {
         this.healthStatus = 'degraded';
         return false;
@@ -52,6 +75,7 @@ class HealthMonitor {
       return false;
     }
   }
+
 
   async autoHeal() {
     if (this.circuitBreaker.state === 'OPEN') {
