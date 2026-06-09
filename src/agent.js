@@ -1,3 +1,23 @@
+
+// Global error boundary for agent.js
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Auto-recovery
+  if (reason.message?.includes('browser')) {
+    console.log('🔄 Auto-recovering browser context...');
+    setTimeout(() => process.exit(1), 1000);
+  }
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Graceful degradation
+  if (error.code === 'ECONNRESET') {
+    console.log('🔄 Connection reset - retrying...');
+  } else {
+    process.exit(1);
+  }
+});
 // src/agent.js — The core agent loop that ties everything together
 'use strict';
 

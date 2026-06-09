@@ -1,3 +1,5 @@
+'use strict';
+const fs = require('fs').promises;
 // src/session-manager.js — Multi-session management with persistence
 'use strict';
 
@@ -38,15 +40,32 @@ class SessionManager {
     });
   }
 
+  
   constructor() {
-    this.sessions = new Map();
-    this.persistenceDir = path.join(process.cwd(), '.seekcode', 'sessions');
-    this.maxSessions = 10;
-    this.sessionTTL = 30 * 60 * 1000; // 30 minutes
+    this.sessions = new Map(); // Consider WeakMap for auto-GC
+    this.sessionTTL = 30 * 60; // 30 minutes
+    this.maxSessions = 100;
+    this.cleanupInterval = null;
     
-    // Cleanup interval
-    setInterval(() => this.cleanupExpiredSessions(), 60000);
+    // Monitor memory usage
+    setInterval(() => {
+      const used = process.memoryUsage();
+      if (used.heapUsed > 500 * 1024 * 1024) { // 500MB
+        console.warn(`High memory usage: ${Math.round(used.heapUsed / 1024 / 1024)}MB`);
+        this.pruneOldestSessions();
+      }
+    }, 60000);
   }
+  
+  pruneOldestSessions() {
+    const sessions = Array.from(this.sessions.entries());
+    if (sessions.length > this.maxSessions) {
+      const toRemove = sessions.slice(0, sessions.length - this.maxSessions);
+      toRemove.forEach(([id]) => this.destroySession(id));
+      console.log(`Pruned ${toRemove.length} old sessions`);
+    }
+  }
+
 
   generateSessionId() {
     return crypto.randomBytes(16).toString('hex');
@@ -139,7 +158,7 @@ class SessionManager {
 
   persistSession(sessionId) {
     try {
-      fs.mkdirSync(this.persistenceDir, { recursive: true });
+      await fs.promises.mkdir(this.persistenceDir, { recursive: true });
       const session = this.sessions.get(sessionId);
       if (session) {
         const data = {
@@ -149,7 +168,7 @@ class SessionManager {
           metadata: session.metadata
         };
         const filePath = path.join(this.persistenceDir, `${sessionId}.json`);
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2));
       }
     } catch (err) {
       logger.warn(`Failed to persist session: ${err.message}`);
@@ -159,8 +178,8 @@ class SessionManager {
   deletePersistedSession(sessionId) {
     try {
       const filePath = path.join(this.persistenceDir, `${sessionId}.json`);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+      if (await fs.promises.access(filePath)) {
+        await fs.promises.unlink(filePath);
       }
     } catch (err) {
       logger.warn(`Failed to delete persisted session: ${err.message}`);
@@ -169,20 +188,20 @@ class SessionManager {
 
   loadPersistedSessions() {
     try {
-      if (!fs.existsSync(this.persistenceDir)) return;
+      if (!await fs.promises.access(this.persistenceDir)) return;
       
       const files = fs.readdirSync(this.persistenceDir);
       for (const file of files) {
         if (file.endsWith('.json')) {
           const filePath = path.join(this.persistenceDir, file);
-          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          const data = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
           
           // Check if session is still valid
           if (Date.now() - data.lastAccessed <= this.sessionTTL) {
             // Note: We can't restore the actual agent, only metadata
             logger.dim(`Found persisted session: ${data.id} (requires recreation)`);
           } else {
-            fs.unlinkSync(filePath);
+            await fs.promises.unlink(filePath);
           }
         }
       }

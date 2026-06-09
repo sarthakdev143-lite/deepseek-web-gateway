@@ -1,3 +1,23 @@
+
+// Global error boundary for browser.js
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Auto-recovery
+  if (reason.message?.includes('browser')) {
+    console.log('🔄 Auto-recovering browser context...');
+    setTimeout(() => process.exit(1), 1000);
+  }
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Graceful degradation
+  if (error.code === 'ECONNRESET') {
+    console.log('🔄 Connection reset - retrying...');
+  } else {
+    process.exit(1);
+  }
+});
 // src/browser.js — Playwright controller for chat.deepseek.com
 'use strict';
 const fs = require('fs');

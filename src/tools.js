@@ -8,32 +8,32 @@ async function atomicWriteFile(filePath, content, createBackup = true) {
   
   try {
     // Create backup if file exists
-    if (createBackup && fs.existsSync(filePath)) {
-      fs.copyFileSync(filePath, backupPath);
+    if (createBackup && await fs.promises.access(filePath)) {
+      await fs.promises.copyFile(filePath, backupPath);
     }
     
     // Write to temp file
-    fs.writeFileSync(tempPath, content, 'utf8');
+    await fs.promises.writeFile(tempPath, content, 'utf8');
     
     // Atomic rename
     fs.renameSync(tempPath, filePath);
     
     // Cleanup backup on success
-    if (fs.existsSync(backupPath)) {
-      fs.unlinkSync(backupPath);
+    if (await fs.promises.access(backupPath)) {
+      await fs.promises.unlink(backupPath);
     }
     
     return { success: true, path: filePath };
   } catch (err) {
     // Restore from backup if available
-    if (fs.existsSync(backupPath)) {
-      fs.copyFileSync(backupPath, filePath);
-      fs.unlinkSync(backupPath);
+    if (await fs.promises.access(backupPath)) {
+      await fs.promises.copyFile(backupPath, filePath);
+      await fs.promises.unlink(backupPath);
     }
     
     // Cleanup temp file
-    if (fs.existsSync(tempPath)) {
-      fs.unlinkSync(tempPath);
+    if (await fs.promises.access(tempPath)) {
+      await fs.promises.unlink(tempPath);
     }
     
     throw new Error(`Atomic write failed: ${err.message}`);
@@ -55,10 +55,10 @@ const LOG_FILE = path.join(process.cwd(), '.seekcode', 'changes.json');
 function logChange(action, filePath, details = '') {
   try {
     const dir = path.dirname(LOG_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!await fs.promises.access(dir)) await fs.promises.mkdir(dir, { recursive: true });
     let log = [];
-    if (fs.existsSync(LOG_FILE)) {
-      log = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
+    if (await fs.promises.access(LOG_FILE)) {
+      log = JSON.parse(await fs.promises.readFile(LOG_FILE, 'utf8'));
     }
     log.push({
       timestamp: new Date().toISOString(),
@@ -66,7 +66,7 @@ function logChange(action, filePath, details = '') {
       file: filePath,
       details
     });
-    fs.writeFileSync(LOG_FILE, JSON.stringify(log, null, 2), 'utf8');
+    await fs.promises.writeFile(LOG_FILE, JSON.stringify(log, null, 2), 'utf8');
   } catch (e) { /* ignore logging errors */ }
 }
 
@@ -118,10 +118,10 @@ const TOOLS = {
     },
     async execute({ path: filePath, start_line, end_line }) {
       const abs = resolve(filePath);
-      if (!fs.existsSync(abs)) throw new Error(`File not found: ${filePath}`);
+      if (!await fs.promises.access(abs)) throw new Error(`File not found: ${filePath}`);
       if (fs.statSync(abs).isDirectory()) throw new Error(`${filePath} is a directory`);
 
-      let content = fs.readFileSync(abs, 'utf8');
+      let content = await fs.promises.readFile(abs, 'utf8');
 
       if (start_line != null || end_line != null) {
         const lines = content.split('\n');
@@ -150,8 +150,8 @@ const TOOLS = {
     },
     async execute({ path: filePath, content }) {
       const abs = resolve(filePath);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, content, 'utf8');
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+      await fs.promises.writeFile(abs, content, 'utf8');
       const lineCount = content.split('\n').length;
       logChange('write', filePath, `wrote ${lineCount} lines`);
       return `✓ Wrote ${formatBytes(Buffer.byteLength(content, 'utf8'))} (${lineCount} lines) → ${filePath}`;
@@ -167,7 +167,7 @@ const TOOLS = {
     },
     async execute({ path: filePath, content }) {
       const abs = resolve(filePath);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
       fs.appendFileSync(abs, content, 'utf8');
       const appendedBytes = Buffer.byteLength(content, 'utf8');
       logChange('append', filePath, `appended ${appendedBytes} bytes`);
@@ -187,7 +187,7 @@ const TOOLS = {
     },
     async execute({ path: filePath, find, replace, use_regex = false, all_occurrences = true }) {
       const abs = resolve(filePath);
-      let content = fs.readFileSync(abs, 'utf8');
+      let content = await fs.promises.readFile(abs, 'utf8');
       const original = content;
 
       if (use_regex) {
@@ -207,7 +207,7 @@ const TOOLS = {
         new RegExp(use_regex ? find : find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')
       ) || []).length;
 
-      fs.writeFileSync(abs, content, 'utf8');
+      await fs.promises.writeFile(abs, content, 'utf8');
       logChange('replace', filePath, `replaced ${count} occurrence(s) of "${find}"`);
       return `✓ Replaced ${count} occurrence(s) of "${find}" in ${filePath}`;
     },
@@ -221,8 +221,8 @@ const TOOLS = {
     },
     async execute({ path: filePath }) {
       const abs = resolve(filePath);
-      if (!fs.existsSync(abs)) throw new Error(`File not found: ${filePath}`);
-      fs.unlinkSync(abs);
+      if (!await fs.promises.access(abs)) throw new Error(`File not found: ${filePath}`);
+      await fs.promises.unlink(abs);
       logChange('delete', filePath, `deleted file`);
       return `✓ Deleted ${filePath}`;
     },
@@ -238,7 +238,7 @@ const TOOLS = {
     },
     async execute({ path: dirPath = '.', recursive = false, show_hidden = false }) {
       const abs = resolve(dirPath);
-      if (!fs.existsSync(abs)) throw new Error(`Directory not found: ${dirPath}`);
+      if (!await fs.promises.access(abs)) throw new Error(`Directory not found: ${dirPath}`);
       if (!fs.statSync(abs).isDirectory()) throw new Error(`${dirPath} is not a directory`);
 
       if (recursive) {
@@ -297,7 +297,7 @@ const TOOLS = {
     },
     async execute({ path: dirPath }) {
       const abs = resolve(dirPath);
-      fs.mkdirSync(abs, { recursive: true });
+      await fs.promises.mkdir(abs, { recursive: true });
       return `✓ Created directory: ${dirPath}`;
     },
   },
@@ -312,8 +312,8 @@ const TOOLS = {
     async execute({ source, destination }) {
       const src = resolve(source);
       const dest = resolve(destination);
-      if (!fs.existsSync(src)) throw new Error(`Source not found: ${source}`);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      if (!await fs.promises.access(src)) throw new Error(`Source not found: ${source}`);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
       fs.renameSync(src, dest);
       return `✓ Moved: ${source} → ${destination}`;
     },
@@ -329,9 +329,9 @@ const TOOLS = {
     async execute({ source, destination }) {
       const src = resolve(source);
       const dest = resolve(destination);
-      if (!fs.existsSync(src)) throw new Error(`Source not found: ${source}`);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(src, dest);
+      if (!await fs.promises.access(src)) throw new Error(`Source not found: ${source}`);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.copyFile(src, dest);
       return `✓ Copied: ${source} → ${destination}`;
     },
   },
@@ -344,7 +344,7 @@ const TOOLS = {
     },
     async execute({ path: filePath }) {
       const abs = resolve(filePath);
-      if (!fs.existsSync(abs)) throw new Error(`Not found: ${filePath}`);
+      if (!await fs.promises.access(abs)) throw new Error(`Not found: ${filePath}`);
       const stat = fs.statSync(abs);
       const info = {
         path: abs,
@@ -356,7 +356,7 @@ const TOOLS = {
         permissions: `0${(stat.mode & 0o777).toString(8)}`,
       };
       if (stat.isFile()) {
-        const content = fs.readFileSync(abs, 'utf8');
+        const content = await fs.promises.readFile(abs, 'utf8');
         info.lines = content.split('\n').length;
         info.encoding = 'utf-8';
       }
@@ -424,7 +424,7 @@ const TOOLS = {
             } else if (entry.isFile()) {
               if (file_pattern && !entry.name.endsWith(file_pattern.replace('*', ''))) continue;
               try {
-                const content = fs.readFileSync(fullPath, 'utf8');
+                const content = await fs.promises.readFile(fullPath, 'utf8');
                 const lines = content.split('\n');
                 const regex = new RegExp(pattern, flags);
                 lines.forEach((line, idx) => {
@@ -504,8 +504,8 @@ const TOOLS = {
       const results = [];
       for (const { path: filePath, content } of files) {
         const abs = resolve(filePath);
-        fs.mkdirSync(path.dirname(abs), { recursive: true });
-        fs.writeFileSync(abs, content, 'utf8');
+        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+        await fs.promises.writeFile(abs, content, 'utf8');
         results.push(`✓ ${filePath}`);
       }
       return `Wrote ${results.length} files:\n${results.join('\n')}`;
@@ -517,8 +517,8 @@ const TOOLS = {
     parameters: {},
     async execute() {
       try {
-        if (fs.existsSync(LOG_FILE)) {
-          const log = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
+        if (await fs.promises.access(LOG_FILE)) {
+          const log = JSON.parse(await fs.promises.readFile(LOG_FILE, 'utf8'));
           return JSON.stringify(log.slice(-50), null, 2);
         }
         return 'No changes logged yet.';
