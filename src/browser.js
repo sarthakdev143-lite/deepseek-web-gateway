@@ -92,13 +92,14 @@ class DeepSeekBrowser {
 
     this.context = await chromium.launchPersistentContext(sessionDir, {
       headless: config.HEADLESS,
-      viewport: { width: 1366, height: 768 },
+      viewport: null,
       userAgent: [
         'Mozilla/5.0 (X11; Linux x86_64)',
         'AppleWebKit/537.36 (KHTML, like Gecko)',
         'Chrome/124.0.0.0 Safari/537.36',
       ].join(' '),
       args: [
+        '--start-maximized',
         '--disable-blink-features=AutomationControlled',
         '--no-first-run',
         '--disable-default-apps',
