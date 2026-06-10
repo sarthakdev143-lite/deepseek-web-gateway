@@ -88,8 +88,17 @@ function truncate(str, max = config.MAX_OUTPUT_LENGTH) {
 
 /** Resolve a path relative to the working directory */
 function resolve(filePath) {
-  if (path.isAbsolute(filePath)) return filePath;
-  return path.resolve(config.WORKING_DIR, filePath);
+  // Windows: handle spaces by normalizing and checking existence
+  let normalizedPath = filePath;
+  if (process.platform === 'win32' && filePath && filePath.includes(' ')) {
+    normalizedPath = filePath.replace(/^["']|["']$/g, '');
+    // If normalized path doesn't exist but original might via short name, try exec
+    if (!fs.existsSync(normalizedPath) && fs.existsSync(filePath)) {
+      return filePath;
+    }
+  }
+  if (path.isAbsolute(normalizedPath)) return normalizedPath;
+  return path.resolve(config.WORKING_DIR, normalizedPath);
 }
 
 function formatBytes(bytes) {
