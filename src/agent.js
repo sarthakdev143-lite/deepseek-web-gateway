@@ -1,4 +1,3 @@
-
 // Global error boundary for agent.js
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -18,11 +17,13 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
   }
 });
+
 // src/agent.js — The core agent loop that ties everything together
 'use strict';
 
 const fs                           = require('fs');
 const path                         = require('path');
+const os                           = require('os');
 const config                       = require('./config');
 const logger                       = require('./logger');
 const DeepSeekBrowser              = require('./browser');
@@ -61,6 +62,7 @@ class DeepSeekAgent {
     this.conversation = new ConversationManager();
     this.options      = options;
     this._running     = false;
+    this.sandbox      = null; // Will be initialized on first command execution
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -73,6 +75,14 @@ class DeepSeekAgent {
 
   /** Shut down cleanly */
   async shutdown() {
+    // Clean up sandbox if it exists
+    if (this.sandbox) {
+      try {
+        await this.sandbox.cleanup();
+      } catch (err) {
+        logger.warn(`Sandbox cleanup failed: ${err.message}`);
+      }
+    }
     await this.browser.close();
   }
 
@@ -132,10 +142,10 @@ class DeepSeekAgent {
         let isError = false;
 
         try {
-          result  = await this._executeToolSafely(parsed.name, parsed.args);
+          result = await this._executeToolSafely(parsed.name, parsed.args);
           logger.toolResult(result);
         } catch (err) {
-          result  = `Error: ${err.message}`;
+          result = `Error: ${err.message}`;
           isError = true;
           logger.toolResult(result, true);
         }
@@ -256,6 +266,63 @@ class DeepSeekAgent {
     rl.close();
   }
 
+  // ── Secure Tool Execution with Sandbox ─────────────────────────────────────
+
+  async _executeToolSafely(toolName, args) {
+    // If it's not run_command, just execute normally
+    if (toolName !== 'run_command') {
+      return await executeTool(toolName, args);
+    }
+
+    // For run_command, we want sandboxing
+    const { command, cwd, timeout, env } = args;
+    
+    // Try to load SecuritySandbox
+    let SecuritySandbox;
+    try {
+      SecuritySandbox = require('./security/SecuritySandbox').SecuritySandbox;
+    } catch (err) {
+      // Sandbox module not installed – fall back to regular execution with warning
+      logger.warn('⚠️ Security sandbox not available. Commands run directly on host (unsafe).');
+      logger.warn('   To enable sandboxing:');
+      logger.warn('   1. Copy security/ folder from seekcode project');
+      logger.warn('   2. Or install Docker for container isolation');
+      return await executeTool(toolName, args);
+    }
+
+    // Initialize sandbox if not already done
+    if (!this.sandbox) {
+      logger.info('Initializing security sandbox...');
+      this.sandbox = new SecuritySandbox({
+        policy: config.SECURITY_POLICY || {
+          approvalRequired: { delete: true, writeOutsideProject: true, network: true, shell: true, install: true },
+          allowNetwork: false,
+        },
+        docker: {
+          image: config.DOCKER_IMAGE || 'node:20-alpine',
+          memory: config.DOCKER_MEMORY || '512m',
+          network: config.ALLOW_NETWORK ? 'bridge' : 'none',
+          timeout: config.COMMAND_TIMEOUT || 60000,
+        },
+      });
+    }
+
+    // Execute through sandbox
+    try {
+      logger.dim(`[Sandbox] Executing: ${command.slice(0, 100)}`);
+      const result = await this.sandbox.execute(command, { cwd, env, timeout });
+      
+      let output = result.stdout;
+      if (result.stderr) output += '\n\nSTDERR:\n' + result.stderr;
+      if (!result.sandboxed) {
+        output += '\n\n⚠️ WARNING: Command ran on host (Docker unavailable). Install Docker for sandboxing.';
+      }
+      return output || '(command completed with no output)';
+    } catch (err) {
+      throw new Error(`Sandbox execution failed: ${err.message}`);
+    }
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   _getWorkingDirListing() {
@@ -323,8 +390,5 @@ class DeepSeekAgent {
     }
   }
 }
-
-// Pull os into scope for the log save helper
-const os = require('os');
 
 module.exports = DeepSeekAgent;
