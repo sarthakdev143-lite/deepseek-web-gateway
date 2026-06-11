@@ -1,10 +1,10 @@
 // src/tools.js — All tools available to the AI agent
 'use strict';
 
-const fs   = require('fs');
+const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const http  = require('http');
+const http = require('http');
 const https = require('https');
 const config = require('./config');
 
@@ -67,7 +67,7 @@ async function logChange(action, filePath, details = '') {
 // ─────────────────────────────────────────────
 
 async function atomicWriteFile(filePath, content) {
-  const tempPath   = `${filePath}.tmp.${Date.now()}`;
+  const tempPath = `${filePath}.tmp.${Date.now()}`;
   const backupPath = `${filePath}.bak`;
 
   try {
@@ -108,9 +108,9 @@ const TOOLS = {
   read_file: {
     description: 'Read the full contents of a file. Optionally read specific line ranges.',
     parameters: {
-      path       : { type: 'string', required: true,  description: 'Path to the file' },
-      start_line : { type: 'number', required: false, description: 'First line to read (1-indexed)' },
-      end_line   : { type: 'number', required: false, description: 'Last line to read (inclusive)' },
+      path: { type: 'string', required: true, description: 'Path to the file' },
+      start_line: { type: 'number', required: false, description: 'First line to read (1-indexed)' },
+      end_line: { type: 'number', required: false, description: 'Last line to read (inclusive)' },
     },
     async execute({ path: filePath, start_line, end_line }) {
       const abs = resolve(filePath);
@@ -146,8 +146,8 @@ const TOOLS = {
       'Use write_file only when creating new files or when a full rewrite is truly needed.',
     ].join(' '),
     parameters: {
-      path    : { type: 'string', required: true, description: 'Destination file path' },
-      content : { type: 'string', required: true, description: 'Full file content to write' },
+      path: { type: 'string', required: true, description: 'Destination file path' },
+      content: { type: 'string', required: true, description: 'Full file content to write' },
     },
     async execute({ path: filePath, content }) {
       const abs = resolve(filePath);
@@ -163,8 +163,8 @@ const TOOLS = {
   append_to_file: {
     description: 'Append text to the end of an existing file (or create it if missing).',
     parameters: {
-      path    : { type: 'string', required: true, description: 'File path' },
-      content : { type: 'string', required: true, description: 'Text to append' },
+      path: { type: 'string', required: true, description: 'File path' },
+      content: { type: 'string', required: true, description: 'Text to append' },
     },
     async execute({ path: filePath, content }) {
       const abs = resolve(filePath);
@@ -182,23 +182,23 @@ const TOOLS = {
       'Supports literal strings or regex patterns. Safer than write_file for partial edits.',
     ].join(' '),
     parameters: {
-      path            : { type: 'string',  required: true,  description: 'File path' },
-      find            : { type: 'string',  required: true,  description: 'Text to find' },
-      replace         : { type: 'string',  required: true,  description: 'Replacement text' },
-      use_regex       : { type: 'boolean', required: false, description: 'Treat "find" as a regex pattern (default: false)' },
-      all_occurrences : { type: 'boolean', required: false, description: 'Replace all occurrences (default: true)' },
+      path: { type: 'string', required: true, description: 'File path' },
+      find: { type: 'string', required: true, description: 'Text to find' },
+      replace: { type: 'string', required: true, description: 'Replacement text' },
+      use_regex: { type: 'boolean', required: false, description: 'Treat "find" as a regex pattern (default: false)' },
+      all_occurrences: { type: 'boolean', required: false, description: 'Replace all occurrences (default: true)' },
     },
     async execute({ path: filePath, find, replace, use_regex = false, all_occurrences = true }) {
       const abs = resolve(filePath);
       // FIXED: existsSync
       if (!fs.existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
-      let content  = await fs.promises.readFile(abs, 'utf8');
+      let content = await fs.promises.readFile(abs, 'utf8');
       const before = content;
 
       if (use_regex) {
         const re = new RegExp(find, all_occurrences ? 'g' : '');
-        content  = content.replace(re, replace);
+        content = content.replace(re, replace);
       } else if (all_occurrences) {
         content = content.split(find).join(replace);
       } else {
@@ -222,7 +222,7 @@ const TOOLS = {
   delete_file: {
     description: 'Permanently delete a file.',
     parameters: {
-      path : { type: 'string', required: true, description: 'File to delete' },
+      path: { type: 'string', required: true, description: 'File to delete' },
     },
     async execute({ path: filePath }) {
       const abs = resolve(filePath);
@@ -238,9 +238,9 @@ const TOOLS = {
   list_directory: {
     description: 'List files and folders in a directory, optionally recursive.',
     parameters: {
-      path        : { type: 'string',  required: false, description: 'Directory to list (default: working dir)' },
-      recursive   : { type: 'boolean', required: false, description: 'Recurse into sub-directories (default: false)' },
-      show_hidden : { type: 'boolean', required: false, description: 'Include hidden files (default: false)' },
+      path: { type: 'string', required: false, description: 'Directory to list (default: working dir)' },
+      recursive: { type: 'boolean', required: false, description: 'Recurse into sub-directories (default: false)' },
+      show_hidden: { type: 'boolean', required: false, description: 'Include hidden files (default: false)' },
     },
     async execute({ path: dirPath = '.', recursive = false, show_hidden = false }) {
       const abs = resolve(dirPath);
@@ -293,7 +293,7 @@ const TOOLS = {
   create_directory: {
     description: 'Create a directory (and all necessary parent directories).',
     parameters: {
-      path : { type: 'string', required: true, description: 'Directory path to create' },
+      path: { type: 'string', required: true, description: 'Directory path to create' },
     },
     async execute({ path: dirPath }) {
       const abs = resolve(dirPath);
@@ -306,11 +306,11 @@ const TOOLS = {
   move_file: {
     description: 'Move or rename a file or directory.',
     parameters: {
-      source      : { type: 'string', required: true, description: 'Source path' },
-      destination : { type: 'string', required: true, description: 'Destination path' },
+      source: { type: 'string', required: true, description: 'Source path' },
+      destination: { type: 'string', required: true, description: 'Destination path' },
     },
     async execute({ source, destination }) {
-      const src  = resolve(source);
+      const src = resolve(source);
       const dest = resolve(destination);
       // FIXED: existsSync
       if (!fs.existsSync(src)) throw new Error(`Source not found: ${source}`);
@@ -324,11 +324,11 @@ const TOOLS = {
   copy_file: {
     description: 'Copy a file to a new location.',
     parameters: {
-      source      : { type: 'string', required: true, description: 'Source file path' },
-      destination : { type: 'string', required: true, description: 'Destination file path' },
+      source: { type: 'string', required: true, description: 'Source file path' },
+      destination: { type: 'string', required: true, description: 'Destination file path' },
     },
     async execute({ source, destination }) {
-      const src  = resolve(source);
+      const src = resolve(source);
       const dest = resolve(destination);
       // FIXED: existsSync
       if (!fs.existsSync(src)) throw new Error(`Source not found: ${source}`);
@@ -342,7 +342,7 @@ const TOOLS = {
   get_file_info: {
     description: 'Get metadata about a file or directory (size, modified date, line count, etc.).',
     parameters: {
-      path : { type: 'string', required: true, description: 'File or directory path' },
+      path: { type: 'string', required: true, description: 'File or directory path' },
     },
     async execute({ path: filePath }) {
       const abs = resolve(filePath);
@@ -350,17 +350,17 @@ const TOOLS = {
       if (!fs.existsSync(abs)) throw new Error(`Not found: ${filePath}`);
       const stat = fs.statSync(abs);
       const info = {
-        path        : abs,
-        type        : stat.isDirectory() ? 'directory' : 'file',
-        size        : stat.size,
-        size_human  : formatBytes(stat.size),
-        modified    : stat.mtime.toISOString(),
-        created     : stat.birthtime.toISOString(),
-        permissions : `0${(stat.mode & 0o777).toString(8)}`,
+        path: abs,
+        type: stat.isDirectory() ? 'directory' : 'file',
+        size: stat.size,
+        size_human: formatBytes(stat.size),
+        modified: stat.mtime.toISOString(),
+        created: stat.birthtime.toISOString(),
+        permissions: `0${(stat.mode & 0o777).toString(8)}`,
       };
       if (stat.isFile()) {
         const content = await fs.promises.readFile(abs, 'utf8');
-        info.lines    = content.split('\n').length;
+        info.lines = content.split('\n').length;
         info.encoding = 'utf-8';
       }
       return JSON.stringify(info, null, 2);
@@ -368,31 +368,50 @@ const TOOLS = {
   },
 
   // ── Run Command ─────────────────────────────────────────────────────────────
+  // run_command: {
+  //   description: 'Execute a shell command and return its output. Runs in the working directory by default.',
+  //   parameters: {
+  //     command : { type: 'string', required: true,  description: 'Shell command to run' },
+  //     cwd     : { type: 'string', required: false, description: 'Working directory for the command' },
+  //     timeout : { type: 'number', required: false, description: 'Timeout in milliseconds (default: 60000)' },
+  //     env     : { type: 'object', required: false, description: 'Extra environment variables' },
+  //   },
+  //   async execute({ command, cwd, timeout = 60_000, env = {} }) {
+  //     const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
+  //     try {
+  //       const output = execSync(command, {
+  //         cwd: workDir, encoding: 'utf8', timeout,
+  //         maxBuffer: 20 * 1024 * 1024,
+  //         env: { ...process.env, ...env },
+  //         stdio: ['pipe', 'pipe', 'pipe'],
+  //       });
+  //       return truncate((output || '').trim() || '(command completed with no output)');
+  //     } catch (err) {
+  //       const stdout = (err.stdout || '').trim();
+  //       const stderr = (err.stderr || '').trim();
+  //       const combined = [stdout && `STDOUT:\n${stdout}`, stderr && `STDERR:\n${stderr}`]
+  //         .filter(Boolean).join('\n\n');
+  //       throw new Error(`Command failed (exit ${err.status}):\n${truncate(combined || err.message)}`);
+  //     }
+  //   },
+  // },
+
   run_command: {
-    description: 'Execute a shell command and return its output. Runs in the working directory by default.',
+    description: 'Execute a shell command (sandboxed). Runs in the working directory by default.',
     parameters: {
-      command : { type: 'string', required: true,  description: 'Shell command to run' },
-      cwd     : { type: 'string', required: false, description: 'Working directory for the command' },
-      timeout : { type: 'number', required: false, description: 'Timeout in milliseconds (default: 60000)' },
-      env     : { type: 'object', required: false, description: 'Extra environment variables' },
+      command: { type: 'string', required: true, description: 'Shell command to run' },
+      cwd: { type: 'string', required: false, description: 'Working directory' },
+      timeout: { type: 'number', required: false, description: 'Timeout in ms (default: 60000)' },
+      env: { type: 'object', required: false, description: 'Extra environment variables' },
     },
-    async execute({ command, cwd, timeout = 60_000, env = {} }) {
-      const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
-      try {
-        const output = execSync(command, {
-          cwd: workDir, encoding: 'utf8', timeout,
-          maxBuffer: 20 * 1024 * 1024,
-          env: { ...process.env, ...env },
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-        return truncate((output || '').trim() || '(command completed with no output)');
-      } catch (err) {
-        const stdout = (err.stdout || '').trim();
-        const stderr = (err.stderr || '').trim();
-        const combined = [stdout && `STDOUT:\n${stdout}`, stderr && `STDERR:\n${stderr}`]
-          .filter(Boolean).join('\n\n');
-        throw new Error(`Command failed (exit ${err.status}):\n${truncate(combined || err.message)}`);
-      }
+    async execute({ command, cwd, timeout = 60000, env = {} }) {
+      // This function will be called from the agent – we need access to the agent's sandbox.
+      // Since the tools module doesn't have the sandbox reference, we throw a special error
+      // that the agent will catch and reroute. Alternatively, you can pass the sandbox via
+      // a global variable – but cleaner: the agent will override this method.
+      const err = new Error('run_command must be executed through the SecuritySandbox');
+      err.code = 'NEED_SANDBOX';
+      throw err;
     },
   },
 
@@ -400,17 +419,17 @@ const TOOLS = {
   find_files: {
     description: 'Search for files by content pattern (grep-style). Optionally filter by file extension.',
     parameters: {
-      pattern        : { type: 'string',  required: true,  description: 'Search pattern (regex or text)' },
-      directory      : { type: 'string',  required: false, description: 'Directory to search (default: working dir)' },
-      file_pattern   : { type: 'string',  required: false, description: 'File extension filter e.g. ".js"' },
-      case_sensitive : { type: 'boolean', required: false, description: 'Case-sensitive search (default: false)' },
-      context_lines  : { type: 'number',  required: false, description: 'Lines of context around match (default: 2)' },
+      pattern: { type: 'string', required: true, description: 'Search pattern (regex or text)' },
+      directory: { type: 'string', required: false, description: 'Directory to search (default: working dir)' },
+      file_pattern: { type: 'string', required: false, description: 'File extension filter e.g. ".js"' },
+      case_sensitive: { type: 'boolean', required: false, description: 'Case-sensitive search (default: false)' },
+      context_lines: { type: 'number', required: false, description: 'Lines of context around match (default: 2)' },
     },
     async execute({ pattern, directory = '.', file_pattern, case_sensitive = false, context_lines = 2 }) {
-      const dir     = resolve(directory);
-      const flags   = case_sensitive ? '' : 'i';
+      const dir = resolve(directory);
+      const flags = case_sensitive ? '' : 'i';
       const results = [];
-      const SKIP    = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage']);
+      const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage']);
 
       const walk = (currentDir, depth = 0) => {
         if (depth > 10) return;
@@ -424,13 +443,13 @@ const TOOLS = {
               if (file_pattern && !entry.name.endsWith(file_pattern.replace('*', ''))) continue;
               try {
                 const content = fs.readFileSync(fullPath, 'utf8');
-                const lines   = content.split('\n');
-                const regex   = new RegExp(pattern, flags);
+                const lines = content.split('\n');
+                const regex = new RegExp(pattern, flags);
                 lines.forEach((line, idx) => {
                   if (regex.test(line)) {
                     const start = Math.max(0, idx - context_lines);
-                    const end   = Math.min(lines.length - 1, idx + context_lines);
-                    const ctx   = lines.slice(start, end + 1)
+                    const end = Math.min(lines.length - 1, idx + context_lines);
+                    const ctx = lines.slice(start, end + 1)
                       .map((l, ci) => `${start + ci + 1}: ${l}`)
                       .join('\n');
                     results.push(`\n${fullPath}:${idx + 1}\n${ctx}`);
@@ -452,15 +471,15 @@ const TOOLS = {
   read_url: {
     description: 'Fetch the text content of a URL (useful for reading documentation, APIs, etc.).',
     parameters: {
-      url : { type: 'string', required: true, description: 'Full URL to fetch (http or https)' },
+      url: { type: 'string', required: true, description: 'Full URL to fetch (http or https)' },
     },
     async execute({ url }) {
       return new Promise((resolve_p, reject) => {
-        const client  = url.startsWith('https') ? https : http;
+        const client = url.startsWith('https') ? https : http;
         const options = {
           headers: {
-            'User-Agent' : 'Mozilla/5.0 (compatible; SeekCode/1.0)',
-            'Accept'     : 'text/html,text/plain,application/json',
+            'User-Agent': 'Mozilla/5.0 (compatible; SeekCode/1.0)',
+            'Accept': 'text/html,text/plain,application/json',
           },
         };
 
@@ -491,7 +510,7 @@ const TOOLS = {
   write_files: {
     description: 'Write multiple files at once — useful for scaffolding projects.',
     parameters: {
-      files : { type: 'array', required: true, description: 'Array of {path, content} objects' },
+      files: { type: 'array', required: true, description: 'Array of {path, content} objects' },
     },
     async execute({ files }) {
       if (!Array.isArray(files)) throw new Error('"files" must be an array of {path, content}');

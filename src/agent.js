@@ -132,7 +132,7 @@ class DeepSeekAgent {
         let isError = false;
 
         try {
-          result  = await executeTool(parsed.name, parsed.args);
+          result  = await this._executeToolSafely(parsed.name, parsed.args);
           logger.toolResult(result);
         } catch (err) {
           result  = `Error: ${err.message}`;
