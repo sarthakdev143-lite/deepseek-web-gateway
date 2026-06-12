@@ -1,23 +1,3 @@
-// Global error boundary for agent.js
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Auto-recovery
-  if (reason.message?.includes('browser')) {
-    console.log('🔄 Auto-recovering browser context...');
-    setTimeout(() => process.exit(1), 1000);
-  }
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  // Graceful degradation
-  if (error.code === 'ECONNRESET') {
-    console.log('🔄 Connection reset - retrying...');
-  } else {
-    process.exit(1);
-  }
-});
-
 // src/agent.js — The core agent loop that ties everything together
 'use strict';
 
@@ -32,19 +12,27 @@ const { parseResponse,
         formatToolResult }         = require('./parser');
 const { ConversationManager }      = require('./prompt');
 
+// Global error boundary for agent.js
+process.on('unhandledRejection', (reason, promise) => {
+  // Defer handling to main orchestrator or ignore non-fatal resets
+  if (reason.message?.includes('browser') || reason.message?.includes('context')) {
+    logger.warn('🔄 Agent rejection caught in global boundary: ' + reason.message);
+  }
+});
+
 // ─────────────────────────────────────────────
 //  Agent class
 // ─────────────────────────────────────────────
 
 class DeepSeekAgent {
 
-  async runWithTimeout(prompt, timeoutMs = 120000) {
+  async runWithTimeout(prompt, timeoutMs = 120000, options = {}) {
     const timeoutPromise = new Promise((_, reject) => 
       setTimeout(() => reject(new Error(`Operation timed out after ${timeoutMs}ms`)), timeoutMs)
     );
     
     try {
-      return await Promise.race([this.run(prompt), timeoutPromise]);
+      return await Promise.race([this.run(prompt, options), timeoutPromise]);
     } catch (err) {
       if (err.message.includes('timed out')) {
         // Attempt to recover browser state
@@ -59,10 +47,25 @@ class DeepSeekAgent {
   constructor(options = {}) {
     this.silent = options.silent || false;
     this.browser      = new DeepSeekBrowser();
-    this.conversation = new ConversationManager();
+    this.conversations = new Map(); // tabName -> ConversationManager
     this.options      = options;
     this._running     = false;
     this.sandbox      = null; // Will be initialized on first command execution
+  }
+
+  get conversation() {
+    const tabName = this.browser.activeTab || 'default';
+    if (!this.conversations.has(tabName)) {
+      this.conversations.set(tabName, new ConversationManager());
+    }
+    return this.conversations.get(tabName);
+  }
+
+  set conversation(val) {
+    const tabName = this.browser.activeTab || 'default';
+    if (val) {
+      this.conversations.set(tabName, val);
+    }
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -90,24 +93,41 @@ class DeepSeekAgent {
    * Run a task to completion.
    * Returns the final response string.
    */
-  async run(task) {
+  async run(task, options = {}) {
     this._running   = true;
     const maxIter   = config.MAX_ITERATIONS;
+
+    // Switch tab and configure model
+    if (options.tab) {
+      await this.browser.switchTab(options.tab);
+    }
+    if (options.model) {
+      await this.browser.selectModel(this.browser.activeTab, options.model);
+    }
 
     // ── 1. Snapshot working directory ──────────────────────────────────────
     const dirListing = this._getWorkingDirListing();
 
     // ── 2. Build and send first message ───────────────────────────────────
-    logger.header(`Task: ${task.slice(0, 80)}${task.length > 80 ? '…' : ''}`);
+    logger.header(`[Tab: ${this.browser.activeTab}] Task: ${task.slice(0, 80)}${task.length > 80 ? '…' : ''}`);
 
-    const firstMsg = this.conversation.buildFirstMessage(task, dirListing);
+    const conversation = this.conversation;
+    let firstMsg;
+    
+    // Only build first message with system prompt if conversation is empty
+    if (conversation.turnCount === 0) {
+      firstMsg = conversation.buildFirstMessage(task, dirListing);
+    } else {
+      firstMsg = task;
+      conversation.messages.push({ role: 'user', content: firstMsg });
+    }
 
     if (config.DEBUG) {
-      logger.dim('--- First message (truncated) ---');
+      logger.dim('--- Message sent (truncated) ---');
       logger.dim(firstMsg.slice(0, 600) + '...');
     }
 
-    logger.info('Sending task to DeepSeek...');
+    logger.info(`Sending task to DeepSeek (${this.browser.activeTab})...`);
     await this.browser.sendMessage(firstMsg);
 
     // ── 3. Agent loop ──────────────────────────────────────────────────────
@@ -129,7 +149,7 @@ class DeepSeekAgent {
       }
 
       // Record the AI response in conversation history
-      this.conversation.addAssistantMessage(rawResponse);
+      conversation.addAssistantMessage(rawResponse);
 
       // Parse the response
       const parsed = parseResponse(rawResponse);
@@ -141,9 +161,20 @@ class DeepSeekAgent {
         let result;
         let isError = false;
 
+        const isMutationTool = ['write_file', 'replace_in_file', 'append_to_file', 'delete_file', 'move_file', 'copy_file'].includes(parsed.name);
+        const sigBefore = isMutationTool ? this._workspaceSignature() : null;
+
         try {
           result = await this._executeToolSafely(parsed.name, parsed.args);
           logger.toolResult(result);
+
+          if (isMutationTool) {
+            const sigAfter = this._workspaceSignature();
+            if (sigBefore === sigAfter) {
+              logger.warn(`Mutation tool ${parsed.name} executed but no filesystem changes detected.`);
+              result += '\n\n⚠️ WARNING: The tool ran successfully, but no file changes were detected on disk. Please verify if the target file path and matching content are correct.';
+            }
+          }
         } catch (err) {
           result = `Error: ${err.message}`;
           isError = true;
@@ -151,7 +182,7 @@ class DeepSeekAgent {
         }
 
         // Feed result back
-        const feedbackMsg = this.conversation.addToolResult(parsed.name, result, isError);
+        const feedbackMsg = conversation.addToolResult(parsed.name, result, isError);
         await this.browser.sendMessage(feedbackMsg);
         continue;
       }
@@ -159,7 +190,7 @@ class DeepSeekAgent {
       // ── Case 2: Parse error ────────────────────────────────────────────
       if (parsed.type === 'error') {
         logger.warn(`Parse error: ${parsed.message}`);
-        const recovery = this.conversation.addToolResult(
+        const recovery = conversation.addToolResult(
           'SYSTEM',
           `Parse error: ${parsed.message}\n\nPlease try again with valid JSON in your tool call.`,
           true
@@ -170,17 +201,15 @@ class DeepSeekAgent {
 
       // ── Case 3: Final response ─────────────────────────────────────────
       if (parsed.type === 'final') {
-        // Safety net: if the "final" response text contains a tool_call block
-        // that our parser missed (e.g. garbled by DOM), send a correction prompt.
         const looksLikeToolCall = (
           /tool_call/i.test(parsed.content) ||
           /"name"\s*:\s*"[\w_]+"/.test(parsed.content) ||
           /write_file|read_file|run_command|list_directory/i.test(parsed.content.slice(0, 200))
         );
 
-        if (looksLikeToolCall && this.conversation.turnCount <= maxIter - 2) {
+        if (looksLikeToolCall && conversation.turnCount <= maxIter - 2) {
           logger.warn('Response looks like a tool call but was not parsed — asking AI to retry format...');
-          const retry = this.conversation.addToolResult(
+          const retry = conversation.addToolResult(
             'SYSTEM',
             'Your response appeared to contain a tool call but it could not be parsed. ' +
             'Please respond with ONLY a ```tool_call code block and nothing else — no prose before or after it.',
@@ -211,10 +240,6 @@ class DeepSeekAgent {
 
   // ── Interactive (REPL) Mode ────────────────────────────────────────────────
 
-  /**
-   * Run the agent in interactive mode — keeps the browser open
-   * and accepts tasks one after another.
-   */
   async runInteractive() {
     const readline = require('readline');
 
@@ -247,12 +272,12 @@ class DeepSeekAgent {
       if (task.toLowerCase() === 'new') {
         logger.info('Starting new chat...');
         await this.browser.newChat();
-        this.conversation = new ConversationManager();
+        this.conversations.clear();
         continue;
       }
 
-      // Reset conversation for each new task
-      this.conversation = new ConversationManager();
+      // Reset conversations map for each new task
+      this.conversations.clear();
 
       try {
         await this.browser.newChat();
@@ -269,28 +294,20 @@ class DeepSeekAgent {
   // ── Secure Tool Execution with Sandbox ─────────────────────────────────────
 
   async _executeToolSafely(toolName, args) {
-    // If it's not run_command, just execute normally
     if (toolName !== 'run_command') {
       return await executeTool(toolName, args);
     }
 
-    // For run_command, we want sandboxing
     const { command, cwd, timeout, env } = args;
     
-    // Try to load SecuritySandbox
     let SecuritySandbox;
     try {
       SecuritySandbox = require('./security/SecuritySandbox').SecuritySandbox;
     } catch (err) {
-      // Sandbox module not installed – fall back to regular execution with warning
       logger.warn('⚠️ Security sandbox not available. Commands run directly on host (unsafe).');
-      logger.warn('   To enable sandboxing:');
-      logger.warn('   1. Copy security/ folder from seekcode project');
-      logger.warn('   2. Or install Docker for container isolation');
       return await executeTool(toolName, args);
     }
 
-    // Initialize sandbox if not already done
     if (!this.sandbox) {
       logger.info('Initializing security sandbox...');
       this.sandbox = new SecuritySandbox({
@@ -307,7 +324,6 @@ class DeepSeekAgent {
       });
     }
 
-    // Execute through sandbox
     try {
       logger.dim(`[Sandbox] Executing: ${command.slice(0, 100)}`);
       const result = await this.sandbox.execute(command, { cwd, env, timeout });
@@ -324,6 +340,34 @@ class DeepSeekAgent {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+
+  _workspaceSignature() {
+    try {
+      const crypto = require('crypto');
+      const files = [];
+      const skip = new Set(['.git', 'node_modules', '.seekcode']);
+      
+      const walk = dir => {
+        if (!fs.existsSync(dir)) return;
+        const items = fs.readdirSync(dir, { withFileTypes: true });
+        for (const item of items) {
+          if (skip.has(item.name)) continue;
+          const abs = path.join(dir, item.name);
+          if (item.isDirectory()) {
+            walk(abs);
+          } else {
+            const stat = fs.statSync(abs);
+            files.push(`${item.name}:${stat.size}:${stat.mtimeMs}`);
+          }
+        }
+      };
+      
+      walk(config.WORKING_DIR);
+      return crypto.createHash('sha1').update(files.join(',')).digest('hex');
+    } catch {
+      return '';
+    }
+  }
 
   _getWorkingDirListing() {
     try {

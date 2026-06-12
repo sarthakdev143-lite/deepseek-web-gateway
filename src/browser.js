@@ -1,31 +1,19 @@
+// src/browser.js — Playwright controller for chat.deepseek.com
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { chromium } = require('playwright');
+const config = require('./config');
+const logger = require('./logger');
 
 // Global error boundary for browser.js
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Auto-recovery
-  if (reason.message?.includes('browser')) {
-    console.log('🔄 Auto-recovering browser context...');
-    setTimeout(() => process.exit(1), 1000);
+  // Defer handling to main orchestrator or ignore non-fatal resets
+  if (reason.message?.includes('browser') || reason.message?.includes('context')) {
+    logger.warn('🔄 Browser rejection caught in global boundary: ' + reason.message);
   }
 });
-
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  // Graceful degradation
-  if (error.code === 'ECONNRESET') {
-    console.log('🔄 Connection reset - retrying...');
-  } else {
-    process.exit(1);
-  }
-});
-// src/browser.js — Playwright controller for chat.deepseek.com
-'use strict';
-const fs = require('fs');
-
-const { chromium } = require('playwright');
-const path = require('path');
-const config = require('./config');
-const logger = require('./logger');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Selector banks — ordered by likelihood, with fallbacks
@@ -33,7 +21,6 @@ const logger = require('./logger');
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SEL = {
-  // Text input where the user types
   chatInput: [
     '#chat-input',
     'textarea[placeholder]',
@@ -41,8 +28,6 @@ const SEL = {
     '[contenteditable="true"][role="textbox"]',
     '[contenteditable="true"]',
   ],
-
-  // Button that submits the message
   sendButton: [
     'button[aria-label*="Send" i]',
     'button[aria-label*="send" i]',
@@ -52,8 +37,6 @@ const SEL = {
     '[class*="sendBtn"]',
     '[class*="send-button"]',
   ],
-
-  // "Stop generating" button — visible while streaming
   stopButton: [
     'button[aria-label*="Stop" i]',
     '[aria-label*="stop generating" i]',
@@ -61,8 +44,6 @@ const SEL = {
     '[class*="stop-btn"]',
     '[class*="stopBtn"]',
   ],
-
-  // "New chat" / "New conversation" button in sidebar
   newChat: [
     'button[aria-label*="New chat" i]',
     'button[aria-label*="New conversation" i]',
@@ -71,8 +52,6 @@ const SEL = {
     '[class*="new-chat"]',
     '[class*="newChat"]',
   ],
-
-  // The main chat messages container
   messageContainer: [
     '[class*="chat-content"]',
     '[class*="message-list"]',
@@ -88,8 +67,29 @@ const SEL = {
 class DeepSeekBrowser {
   constructor() {
     this.context = null;
-    this.page = null;
+    this.pages = new Map(); // tabName -> Playwright Page object
+    this.adaptiveSelectors = new Map(); // tabName -> AdaptiveSelector object
+    this.activeTab = 'default';
     this._closed = false;
+  }
+
+  get page() {
+    return this.pages.get(this.activeTab) || null;
+  }
+
+  set page(val) {
+    if (val) {
+      this.pages.set(this.activeTab, val);
+    }
+  }
+
+  get adaptiveSelector() {
+    if (!this.page) return null;
+    if (!this.adaptiveSelectors.has(this.activeTab)) {
+      const { AdaptiveSelector } = require('./adaptive-selectors');
+      this.adaptiveSelectors.set(this.activeTab, new AdaptiveSelector(this.page));
+    }
+    return this.adaptiveSelectors.get(this.activeTab);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -131,10 +131,12 @@ class DeepSeekBrowser {
 
     // Grab existing page or open a new one
     const pages = this.context.pages();
-    this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
+    const defaultPage = pages.length > 0 ? pages[0] : await this.context.newPage();
+    this.pages.set('default', defaultPage);
+    this.activeTab = 'default';
 
     // Mask automation signals
-    await this.page.addInitScript(() => {
+    await defaultPage.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
@@ -164,6 +166,65 @@ class DeepSeekBrowser {
     try { await this.context?.close(); } catch { }
   }
 
+  async switchTab(tabName) {
+    if (!tabName) return;
+    logger.info(`Switching browser tab to: ${tabName}`);
+    if (!this.pages.has(tabName)) {
+      logger.info(`Creating new tab/thread for: ${tabName}`);
+      const newPage = await this.context.newPage();
+      // Mask automation signals
+      await newPage.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      });
+      this.pages.set(tabName, newPage);
+      this.activeTab = tabName;
+      // Navigate and start new chat
+      await this._navigate(config.DEEPSEEK_URL);
+      await this.newChat();
+    } else {
+      this.activeTab = tabName;
+      const page = this.pages.get(tabName);
+      await page.bringToFront();
+    }
+  }
+
+  async selectModel(tabName, modelName) {
+    if (!modelName) return;
+    logger.info(`Configuring model for tab ${tabName}: ${modelName}`);
+    await this.switchTab(tabName);
+    try {
+      const isR1 = modelName.toUpperCase().includes('R1');
+      const targetLabel = isR1 ? 'DeepSeek-R1' : 'DeepSeek-V3';
+      
+      // Look for the model selection dropdown button
+      const dropdown = await this.page.locator('div, button').filter({ hasText: /DeepSeek-V3|DeepSeek-R1/ }).first();
+      if (await dropdown.count() > 0) {
+        const text = await dropdown.innerText();
+        if (text.includes(targetLabel)) {
+          logger.dim(`Model on tab ${tabName} is already set to ${targetLabel}`);
+          return;
+        }
+        
+        await dropdown.click();
+        await this.page.waitForTimeout(600);
+        
+        const option = await this.page.locator('div, li, span').filter({ hasText: new RegExp(targetLabel, 'i') }).first();
+        if (await option.count() > 0) {
+          await option.click();
+          await this.page.waitForTimeout(1000);
+          logger.success(`Switched model on tab ${tabName} to ${targetLabel}`);
+        } else {
+          logger.warn(`Could not find dropdown option for ${targetLabel}`);
+          await this.page.keyboard.press('Escape');
+        }
+      } else {
+        logger.warn('Could not locate model switcher dropdown on page');
+      }
+    } catch (err) {
+      logger.warn(`Failed to switch model: ${err.message}`);
+    }
+  }
+
   // ── Navigation ─────────────────────────────────────────────────────────────
 
   async _navigate(url) {
@@ -176,8 +237,17 @@ class DeepSeekBrowser {
   }
 
   async newChat() {
+    if (this.adaptiveSelector) {
+      const el = await this.adaptiveSelector.findElement('newChat');
+      if (el && await el.isVisible()) {
+        await el.click();
+        await this.page.waitForTimeout(1_000);
+        logger.dim('Started new chat session via adaptive selector');
+        return;
+      }
+    }
+
     try {
-      // Try clicking the "New Chat" button in the sidebar
       for (const sel of SEL.newChat) {
         try {
           const el = await this.page.$(sel);
@@ -191,7 +261,6 @@ class DeepSeekBrowser {
       }
     } catch { }
 
-    // Fallback: navigate to home which usually opens a fresh chat
     await this._navigate(config.DEEPSEEK_URL);
     logger.dim('Navigated to DeepSeek home (new chat)');
   }
@@ -260,40 +329,30 @@ class DeepSeekBrowser {
   // ── Sending Messages ───────────────────────────────────────────────────────
 
   async sendMessage(text) {
-    // Find input element
     const { el, isTextarea } = await this._findInput();
 
-    // Click to focus
     await el.click({ force: true });
     await this.page.waitForTimeout(200);
 
-    // Clear existing content
     await this.page.keyboard.press('Control+a');
     await this.page.waitForTimeout(100);
 
     if (isTextarea) {
-      // Standard textarea — use fill() which is reliable
       await el.fill(text);
     } else {
-      // contenteditable div — needs execCommand
       await this.page.evaluate((element, content) => {
         element.focus();
-        // Select all and delete
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
-        // Insert text (fires proper input events)
         document.execCommand('insertText', false, content);
-        // Belt-and-suspenders: fire input event manually
         element.dispatchEvent(new InputEvent('input', { bubbles: true, data: content }));
       }, el, text);
     }
 
     await this.page.waitForTimeout(config.SEND_DELAY);
 
-    // Try send button, fall back to Enter
     const clicked = await this._clickSendButton();
     if (!clicked) {
-      // DeepSeek uses plain Enter to submit (Shift+Enter for newlines)
       await this.page.keyboard.press('Enter');
     }
 
@@ -301,6 +360,15 @@ class DeepSeekBrowser {
   }
 
   async _findInput() {
+    if (this.adaptiveSelector) {
+      const el = await this.adaptiveSelector.findElement('chatInput');
+      if (el) {
+        const tagName = await el.evaluate(e => e.tagName.toLowerCase());
+        const isContentEditable = await el.evaluate(e => e.isContentEditable);
+        return { el, isTextarea: tagName === 'textarea' && !isContentEditable };
+      }
+    }
+
     for (const sel of SEL.chatInput) {
       try {
         const el = await this.page.waitForSelector(sel, { timeout: 4_000, state: 'visible' });
@@ -319,6 +387,14 @@ class DeepSeekBrowser {
   }
 
   async _clickSendButton() {
+    if (this.adaptiveSelector) {
+      const el = await this.adaptiveSelector.findElement('sendButton');
+      if (el && await el.isVisible() && await el.isEnabled()) {
+        await el.click();
+        return true;
+      }
+    }
+
     for (const sel of SEL.sendButton) {
       try {
         const el = await this.page.$(sel);
@@ -333,22 +409,11 @@ class DeepSeekBrowser {
 
   // ── Waiting for Response ───────────────────────────────────────────────────
 
-  /**
-   * Wait until DeepSeek finishes generating and return the response text.
-   *
-   * Algorithm:
-   *  1. Record how many assistant messages are on the page right now.
-   *  2. Wait until a new message appears (count goes up).
-   *  3. Poll the last message text every 500 ms.
-   *  4. When the text has not changed for STABLE_DELAY ms AND
-   *     no stop/loading indicator is visible → done.
-   */
   async waitForResponse() {
     const timeout = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
     const start = Date.now();
 
-    // ── Phase 1: wait for a new message to appear ──────────────────────────
     const initialCount = await this._getMessageCount();
     let appeared = false;
 
@@ -360,7 +425,6 @@ class DeepSeekBrowser {
 
     if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
 
-    // ── Phase 2: wait for text to stabilise ───────────────────────────────
     let lastText = '';
     let stableStart = null;
     let dotCount = 0;
@@ -374,12 +438,11 @@ class DeepSeekBrowser {
       } else if (text.length > 0) {
         if (!stableStart) stableStart = Date.now();
         else if (Date.now() - stableStart >= stableDelay) {
-          if (!await this._isGenerating()) break;  // confirmed done
-          stableStart = null;                       // still generating, reset
+          if (!await this._isGenerating()) break;
+          stableStart = null;
         }
       }
 
-      // Progress indicator
       dotCount = (dotCount + 1) % 4;
       logger.thinking(`Receiving response${'.'.repeat(dotCount)}  (${text.length} chars)`);
 
@@ -394,7 +457,6 @@ class DeepSeekBrowser {
 
   // ── DOM Extraction ─────────────────────────────────────────────────────────
 
-  /** Count how many "response" blocks are visible */
   async _getMessageCount() {
     return await this.page.evaluate(() => {
       const candidates = [
@@ -409,19 +471,12 @@ class DeepSeekBrowser {
         const els = document.querySelectorAll(sel);
         if (els.length > 0) return els.length;
       }
-      // Broad fallback
       return document.querySelectorAll('[class*="message"]').length;
     });
   }
 
-  /** Extract the text of the last assistant message — including code blocks */
   async _extractLastMessage() {
     return await this.page.evaluate(() => {
-
-      // ── Helper: get all text including code blocks ────────────────────────
-      // Walks the DOM and reconstructs text, re-adding fence markers for code
-      // blocks so the parser can recognise tool_call fences even after the
-      // browser markdown renderer has converted them to <pre><code> elements.
       function getFullText(el) {
         if (!el) return '';
         let result = '';
@@ -434,8 +489,6 @@ class DeepSeekBrowser {
           if (node.nodeType !== Node.ELEMENT_NODE) return;
           const tag = node.tagName.toLowerCase();
 
-          // <pre> wraps a fenced code block — reconstruct the backtick fence
-          // so the parser can match the ```tool_call regex.
           if (tag === 'pre') {
             const codeEl = node.querySelector('code');
             if (codeEl) {
@@ -449,7 +502,6 @@ class DeepSeekBrowser {
             return;
           }
 
-          // Inline <code> — skip if inside a <pre> (already handled)
           if (tag === 'code') {
             const parentTag = node.parentElement && node.parentElement.tagName
               ? node.parentElement.tagName.toLowerCase() : '';
@@ -470,7 +522,6 @@ class DeepSeekBrowser {
         return result.trim();
       }
 
-      // ── Attempt 1: Specific assistant-message selectors ──────────────────
       const directSelectors = [
         '.ds-markdown',
         '[class*="assistant"] [class*="markdown"]',
@@ -490,7 +541,6 @@ class DeepSeekBrowser {
         }
       }
 
-      // ── Attempt 2: Any markdown/prose container ───────────────────────────
       const markdownEls = document.querySelectorAll(
         '[class*="markdown"], [class*="prose"], [class*="rendered"]'
       );
@@ -499,7 +549,6 @@ class DeepSeekBrowser {
         if (t.length > 10) return t;
       }
 
-      // ── Attempt 3: Heuristic — large non-user text blocks ────────────────
       const allBlocks = Array.from(
         document.querySelectorAll('[class*="message"], [class*="chat-item"], [class*="turn"]')
       );
@@ -521,10 +570,13 @@ class DeepSeekBrowser {
     });
   }
 
-  /** True if DeepSeek is still streaming / generating */
   async _isGenerating() {
+    if (this.adaptiveSelector) {
+      const el = await this.adaptiveSelector.trySelector(SEL.stopButton[0]);
+      if (el) return true;
+    }
+
     return await this.page.evaluate(() => {
-      // Check for stop button
       const stopSelectors = [
         'button[aria-label*="Stop" i]',
         '[class*="stop-gen"]',
@@ -539,7 +591,6 @@ class DeepSeekBrowser {
         }
       }
 
-      // Check for animated loading/typing indicators
       const loaderSelectors = [
         '[class*="typing"]',
         '[class*="loading"]',
@@ -562,8 +613,6 @@ class DeepSeekBrowser {
     });
   }
 
-  // ── Text Cleanup ───────────────────────────────────────────────────────────
-
   _cleanText(text) {
     if (!text) return '';
 
@@ -575,12 +624,6 @@ class DeepSeekBrowser {
       .trim();
   }
 
-  // ── Debug / Calibration Utilities ─────────────────────────────────────────
-
-  /**
-   * Dump useful DOM information to stdout.
-   * Called by `node src/calibrate.js` or `--debug` flag.
-   */
   async dumpDebugInfo() {
     const info = await this.page.evaluate(() => {
       const classFreq = {};
@@ -621,33 +664,32 @@ class DeepSeekBrowser {
     console.log('═'.repeat(60) + '\n');
   }
 
-  /** Take a screenshot (for debugging) */
-  async screenshot(filePath = '/tmp/deepseek-agent-debug.png') {
-    await this.page.screenshot({ path: filePath, fullPage: false });
-    logger.info(`Screenshot saved: ${filePath}`);
+  async screenshot(filePath) {
+    const defaultPath = path.join(config.SESSION_DIR, 'debug-screenshot.png');
+    const finalPath = filePath || defaultPath;
+    await this.page.screenshot({ path: finalPath, fullPage: false });
+    logger.info(`Screenshot saved: ${finalPath}`);
   }
 }
 
-// ── Unicode Mojibake Sanitizer ─────────────────────────────────────────
-// Fixes common UTF-8 bytes misinterpreted as Windows-1252 / ISO-8859-1.
 function sanitizeUnicode(text) {
   if (!text) return '';
   const map = {
-    "â€œ": "“", "â€": "”", "â€˜": "‘", "â€™": "’",
+    "â€œ": "“", "â€ ": "”", "â€˜": "‘", "â€™": "’",
     "â€”": "—", "â€“": "–", "â€¦": "…", "â€¢": "•",
     "â€°": "‰", "â€¹": "‹", "â€º": "›", "â€ž": "„",
     "â€¡": "‡", "â„¢": "™", "Â©": "©", "Â®": "®",
     "Â°": "°", "Â±": "±", "Â²": "²", "Â³": "³",
     "Âµ": "µ", "Â¶": "¶", "Â·": "·", "Â¹": "¹",
     "Â¼": "¼", "Â½": "½", "Â¾": "¾", "Â¿": "¿",
-    "Ã": "À", "Ã": "Á", "Ã": "Â", "Ã": "Ã",
+    "Ã€": "À", "Ã ": "Á", "Ã‚": "Â", "Ãƒ": "Ã",
     "Ã„": "Ä", "Ã…": "Å", "Ã†": "Æ", "Ã‡": "Ç",
     "Ãˆ": "È", "Ã‰": "É", "ÃŠ": "Ê", "Ã‹": "Ë",
-    "ÃŒ": "Ì", "Ã": "Í", "ÃŽ": "Î", "Ã": "Ï",
-    "Ã": "Ð", "Ã‘": "Ñ", "Ã’": "Ò", "Ã“": "Ó",
+    "ÃŒ": "Ì", "Ã ": "Í", "ÃŽ": "Î", "Ã ": "Ï",
+    "Ã ": "Ð", "Ã‘": "Ñ", "Ã’": "Ò", "Ã“": "Ó",
     "Ã”": "Ô", "Ã•": "Õ", "Ã–": "Ö", "Ã—": "×",
     "Ã˜": "Ø", "Ã™": "Ù", "Ãš": "Ú", "Ã›": "Û",
-    "Ãœ": "Ü", "Ã": "Ý", "Ãž": "Þ", "ÃŸ": "ß",
+    "Ãœ": "Ü", "Ã ": "Ý", "Ãž": "Þ", "ÃŸ": "ß",
     "Ã ": "à", "Ã¡": "á", "Ã¢": "â", "Ã£": "ã",
     "Ã¤": "ä", "Ã¥": "å", "Ã¦": "æ", "Ã§": "ç",
     "Ã¨": "è", "Ã©": "é", "Ãª": "ê", "Ã«": "ë",

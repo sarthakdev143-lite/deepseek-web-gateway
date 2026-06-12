@@ -66,17 +66,3 @@ fs.mkdirSync(config.SESSION_DIR, { recursive: true });
 fs.mkdirSync(path.join(os.homedir(), '.deepseek-agent', 'logs'), { recursive: true });
 
 module.exports = config;
-
-// Config validation and defaults
-function validateConfig(config) {
-  const defaults = {
-    timeout: 30000,
-    maxRetries: 3,
-    headless: true,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-  };
-  
-  return { ...defaults, ...config };
-}
-
-module.exports = validateConfig(module.exports || {});

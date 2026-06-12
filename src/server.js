@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json());
 
 // ─────────────────────────────────────────────
-//  Session factory with retry — FIXED: was calling itself recursively
+//  Session factory with retry
 // ─────────────────────────────────────────────
 async function createAgentWithRetry(maxRetries = 3) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -29,6 +29,7 @@ async function createAgentWithRetry(maxRetries = 3) {
 }
 
 const sessionManager = new SessionManager();
+sessionManager.startAutoCleanup(); // Enable background session cleanup
 
 // ─────────────────────────────────────────────
 //  Middleware
@@ -79,6 +80,7 @@ app.post('/session/create', async (req, res) => {
     // Attach health monitor directly on the session object
     const session = sessionManager.getSession(sessionId);
     session.healthMonitor = healthMonitor;
+    session.chatQueue = Promise.resolve(); // Queue for sequential message serialization
     sessionManager.updateMetadata(sessionId, { createdAt: new Date().toISOString() });
 
     res.json({ sessionId, status: 'ready', ttl: sessionManager.sessionTTL });
@@ -90,30 +92,44 @@ app.post('/session/create', async (req, res) => {
 
 // POST /session/:id/chat — run a task prompt
 app.post('/session/:id/chat', validateSession, async (req, res) => {
-  const { prompt } = req.body;
+  const { prompt, tab, model } = req.body;
   const { agent, healthMonitor } = req.session;
 
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
   }
 
-  try {
-    let result;
-
-    if (healthMonitor) {
-      result = await healthMonitor.executeWithProtection(
-        () => agent.run(prompt),
-        () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
-      );
-    } else {
-      result = await agent.run(prompt);
-    }
-
-    res.json({ text: result, toolCalls: [] });
-  } catch (err) {
-    logger.error(`Chat failed for session ${req.params.id}: ${err.message}`);
-    res.status(500).json({ error: err.message });
+  if (!req.session.chatQueue) {
+    req.session.chatQueue = Promise.resolve();
   }
+
+  // Queue tasks sequentially per session to prevent bot-detection bans
+  const executeChat = () => new Promise(async (resolve, reject) => {
+    try {
+      let result;
+
+      if (healthMonitor) {
+        result = await healthMonitor.executeWithProtection(
+          () => agent.run(prompt, { tab, model }),
+          () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
+        );
+      } else {
+        result = await agent.run(prompt, { tab, model });
+      }
+
+      res.json({ text: result, toolCalls: [] });
+      resolve();
+    } catch (err) {
+      logger.error(`Chat failed for session ${req.params.id}: ${err.message}`);
+      res.status(500).json({ error: err.message });
+      reject(err);
+    }
+  });
+
+  // Chain to the queue and ignore failures of previous runs
+  req.session.chatQueue = req.session.chatQueue
+    .then(executeChat)
+    .catch(() => executeChat());
 });
 
 // POST /session/:id/close — shut down and remove session

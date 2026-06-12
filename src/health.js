@@ -13,7 +13,7 @@ class HealthMonitor {
       if (!this.agent.browser.page) {
         // Attempt to recover missing page
         logger.warn('Page missing - attempting to recreate');
-        await this.agent.browser.init();
+        await this.agent.browser.launch();
         return !!this.agent.browser.page;
       }
       return true;
@@ -133,7 +133,8 @@ class HealthMonitor {
   }
 
   async clearSession() {
-    const sessionDir = path.resolve(process.env.DEEPSEEK_SESSION_DIR || './.deepseek-session');
+    const config = require('./config');
+    const sessionDir = path.resolve(config.SESSION_DIR);
     if (fs.existsSync(sessionDir)) {
       fs.rmSync(sessionDir, { recursive: true, force: true });
       logger.info('Cleared corrupted session data');
