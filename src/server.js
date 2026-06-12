@@ -73,6 +73,7 @@ async function validateSession(req, res, next) {
 app.post('/session/create', async (req, res) => {
   try {
     const agent = await createAgentWithRetry(3);
+    const workingDir = req.body?.workingDir || null;
 
     const sessionId = sessionManager.createSession(agent);
     const healthMonitor = new HealthMonitor(agent);
@@ -81,7 +82,8 @@ app.post('/session/create', async (req, res) => {
     const session = sessionManager.getSession(sessionId);
     session.healthMonitor = healthMonitor;
     session.chatQueue = Promise.resolve(); // Queue for sequential message serialization
-    sessionManager.updateMetadata(sessionId, { createdAt: new Date().toISOString() });
+    session.workingDir = workingDir;       // Per-session project root for tool resolution
+    sessionManager.updateMetadata(sessionId, { createdAt: new Date().toISOString(), workingDir });
 
     res.json({ sessionId, status: 'ready', ttl: sessionManager.sessionTTL });
   } catch (err) {
@@ -93,7 +95,7 @@ app.post('/session/create', async (req, res) => {
 // POST /session/:id/chat — run a task prompt
 app.post('/session/:id/chat', validateSession, async (req, res) => {
   const { prompt, tab, model } = req.body;
-  const { agent, healthMonitor } = req.session;
+  const { agent, healthMonitor, workingDir } = req.session;
 
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
@@ -110,11 +112,11 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
 
       if (healthMonitor) {
         result = await healthMonitor.executeWithProtection(
-          () => agent.run(prompt, { tab, model }),
+          () => agent.run(prompt, { tab, model, workingDir }),
           () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
         );
       } else {
-        result = await agent.run(prompt, { tab, model });
+        result = await agent.run(prompt, { tab, model, workingDir });
       }
 
       res.json({ text: result, toolCalls: [] });

@@ -97,6 +97,13 @@ class DeepSeekAgent {
     this._running   = true;
     const maxIter   = config.MAX_ITERATIONS;
 
+    // ── 0. Apply per-session working directory ──────────────────────────────
+    // This MUST happen before any tool is executed so that resolve() in tools.js
+    // uses the user's project path, not the gateway's own cwd.
+    if (options.workingDir) {
+      config.WORKING_DIR = options.workingDir;
+    }
+
     // Switch tab and configure model
     if (options.tab) {
       await this.browser.switchTab(options.tab);
