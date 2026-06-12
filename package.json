@@ -109,7 +109,10 @@
     "start:server": "node src/server.js",
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "logs": "node src/view-logs.js",
+    "logs:last": "node src/view-logs.js --last",
+    "logs:summary": "node src/view-logs.js --last --summary"
   },
   "keywords": [],
   "author": "",

@@ -37,6 +37,13 @@ const SEL = {
     '[class*="sendBtn"]',
     '[class*="send-button"]',
   ],
+  continueButton: [
+    'button[id*="continue" i]',
+    'button[class*="continue" i]',
+    '[data-testid*="continue" i]',
+    // DeepSeek renders a plain button with exactly this text
+    'button',  // fallback: scanned by text content below
+  ],
   stopButton: [
     'button[aria-label*="Stop" i]',
     '[aria-label*="stop generating" i]',
@@ -409,11 +416,61 @@ class DeepSeekBrowser {
 
   // ── Waiting for Response ───────────────────────────────────────────────────
 
+  /**
+   * Clicks the DeepSeek "Continue" button if it is visible.
+   * Returns true if the button was found and clicked.
+   */
+  async _clickContinueIfPresent() {
+    try {
+      // Strategy 1: scan all visible buttons for exact "Continue" text
+      const found = await this.page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        for (const btn of buttons) {
+          const txt = (btn.innerText || btn.textContent || '').trim();
+          if (
+            (txt === 'Continue' || txt === 'Continue generating') &&
+            btn.offsetParent !== null // visible
+          ) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (found) return true;
+
+      // Strategy 2: aria-label / data-testid variants
+      for (const sel of [
+        'button[aria-label*="continue" i]',
+        '[data-testid*="continue" i]',
+        '[class*="continue-btn"]',
+        '[class*="continueBtn"]',
+      ]) {
+        try {
+          const el = await this.page.$(sel);
+          if (el && await el.isVisible()) {
+            await el.click();
+            return true;
+          }
+        } catch { }
+      }
+    } catch (err) {
+      logger.warn(`_clickContinueIfPresent error: ${err.message}`);
+    }
+    return false;
+  }
+
+  /**
+   * Wait for the DeepSeek model to finish responding.
+   * Handles mid-response "Continue" buttons transparently by clicking them
+   * and accumulating all chunks into a single returned string.
+   */
   async waitForResponse() {
     const timeout = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
     const start = Date.now();
 
+    // ── Wait for the first new message to appear ──────────────────────────
     const initialCount = await this._getMessageCount();
     let appeared = false;
 
@@ -425,34 +482,76 @@ class DeepSeekBrowser {
 
     if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
 
-    let lastText = '';
-    let stableStart = null;
-    let dotCount = 0;
+    // ── Main accumulation loop (handles "Continue" buttons) ───────────────
+    let accumulatedText = '';
+    let continueRound = 0;
+    const MAX_CONTINUE_ROUNDS = 20; // safety cap
 
-    while (Date.now() - start < timeout) {
-      const text = await this._extractLastMessage();
+    while (continueRound < MAX_CONTINUE_ROUNDS) {
+      // --- Inner stability loop: wait until this chunk stops streaming ---
+      let lastText = '';
+      let stableStart = null;
+      let dotCount = 0;
 
-      if (text !== lastText) {
-        lastText = text;
-        stableStart = null;
-      } else if (text.length > 0) {
-        if (!stableStart) stableStart = Date.now();
-        else if (Date.now() - stableStart >= stableDelay) {
-          if (!await this._isGenerating()) break;
+      while (Date.now() - start < timeout) {
+        const text = await this._extractLastMessage();
+
+        if (text !== lastText) {
+          lastText = text;
           stableStart = null;
+        } else if (text.length > 0) {
+          if (!stableStart) stableStart = Date.now();
+          else if (Date.now() - stableStart >= stableDelay) {
+            if (!await this._isGenerating()) break; // truly stopped
+            stableStart = null; // still streaming — reset
+          }
+        }
+
+        dotCount = (dotCount + 1) % 4;
+        logger.thinking(
+          `Receiving response${'.'.repeat(dotCount)}  (${text.length} chars` +
+          (continueRound > 0 ? `, part ${continueRound + 1}` : '') + ')'
+        );
+        await this.page.waitForTimeout(500);
+      }
+
+      logger.clearLine();
+
+      // Record what was received in this round
+      const roundText = this._cleanText(await this._extractLastMessage());
+
+      if (continueRound === 0) {
+        accumulatedText = roundText;
+      } else {
+        // Append only the genuinely new part (avoid re-appending the full DOM text)
+        // DeepSeek keeps the whole conversation in the DOM, so we diff by length
+        const newChars = roundText.slice(accumulatedText.length);
+        if (newChars.trim()) {
+          accumulatedText += newChars;
+          logger.info(`Appended ${newChars.length} chars from continue-round ${continueRound}`);
+        } else {
+          // Nothing new was added — continuation is complete
+          break;
         }
       }
 
-      dotCount = (dotCount + 1) % 4;
-      logger.thinking(`Receiving response${'.'.repeat(dotCount)}  (${text.length} chars)`);
+      // ── Check for Continue button ────────────────────────────────────
+      await this.page.waitForTimeout(800); // let UI settle
+      const clicked = await this._clickContinueIfPresent();
+      if (!clicked) break; // no Continue button — fully done
 
-      await this.page.waitForTimeout(500);
+      logger.info(`Clicked "Continue" (round ${continueRound + 1}) — accumulating next chunk...`);
+      continueRound++;
+
+      // Wait for the next chunk to start arriving
+      await this.page.waitForTimeout(1_500);
     }
 
-    logger.clearLine();
+    if (continueRound > 0) {
+      logger.success(`Response completed across ${continueRound + 1} continuation(s) (${accumulatedText.length} total chars)`);
+    }
 
-    const final = await this._extractLastMessage();
-    return this._cleanText(final);
+    return accumulatedText;
   }
 
   // ── DOM Extraction ─────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ const DeepSeekAgent = require('./agent');
 const { SessionManager } = require('./session-manager');
 const { HealthMonitor } = require('./health');
 const logger = require('./logger');
+const { createSessionLogger } = require('./session-logger');
 
 const app = express();
 app.use(express.json());
@@ -78,11 +79,15 @@ app.post('/session/create', async (req, res) => {
     const sessionId = sessionManager.createSession(agent);
     const healthMonitor = new HealthMonitor(agent);
 
-    // Attach health monitor directly on the session object
+    // Create a structured per-session logger
+    const sessionLogger = createSessionLogger(sessionId, workingDir);
+
+    // Attach everything on the session object
     const session = sessionManager.getSession(sessionId);
     session.healthMonitor = healthMonitor;
-    session.chatQueue = Promise.resolve(); // Queue for sequential message serialization
-    session.workingDir = workingDir;       // Per-session project root for tool resolution
+    session.chatQueue    = Promise.resolve();
+    session.workingDir   = workingDir;
+    session.sessionLogger = sessionLogger;
     sessionManager.updateMetadata(sessionId, { createdAt: new Date().toISOString(), workingDir });
 
     res.json({ sessionId, status: 'ready', ttl: sessionManager.sessionTTL });
@@ -95,7 +100,7 @@ app.post('/session/create', async (req, res) => {
 // POST /session/:id/chat — run a task prompt
 app.post('/session/:id/chat', validateSession, async (req, res) => {
   const { prompt, tab, model } = req.body;
-  const { agent, healthMonitor, workingDir } = req.session;
+  const { agent, healthMonitor, workingDir, sessionLogger } = req.session;
 
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
@@ -108,21 +113,24 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
   // Queue tasks sequentially per session to prevent bot-detection bans
   const executeChat = () => new Promise(async (resolve, reject) => {
     try {
+      sessionLogger?.logOrchestration('CHAT_REQUEST', { tab, model, promptLen: (prompt || '').length });
       let result;
 
       if (healthMonitor) {
         result = await healthMonitor.executeWithProtection(
-          () => agent.run(prompt, { tab, model, workingDir }),
+          () => agent.run(prompt, { tab, model, workingDir, sessionLogger }),
           () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
         );
       } else {
-        result = await agent.run(prompt, { tab, model, workingDir });
+        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger });
       }
 
+      sessionLogger?.logOrchestration('CHAT_COMPLETE', { tab, model, resultLen: (result || '').length });
       res.json({ text: result, toolCalls: [] });
       resolve();
     } catch (err) {
       logger.error(`Chat failed for session ${req.params.id}: ${err.message}`);
+      sessionLogger?.logError(`Chat failed: ${err.message}`, { tab, model });
       res.status(500).json({ error: err.message });
       reject(err);
     }
@@ -137,6 +145,9 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
 // POST /session/:id/close — shut down and remove session
 app.post('/session/:id/close', async (req, res) => {
   const sessionId = req.params.id;
+  // Close the logger before destroying session
+  const session = sessionManager.getSession(sessionId);
+  session?.sessionLogger?.close();
   await sessionManager.destroySession(sessionId);
   res.json({ status: 'closed', sessionId });
 });

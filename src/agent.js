@@ -11,6 +11,7 @@ const { executeTool }              = require('./tools');
 const { parseResponse,
         formatToolResult }         = require('./parser');
 const { ConversationManager }      = require('./prompt');
+const { getSessionLogger }         = require('./session-logger');
 
 // Global error boundary for agent.js
 process.on('unhandledRejection', (reason, promise) => {
@@ -45,12 +46,13 @@ class DeepSeekAgent {
   }
 
   constructor(options = {}) {
-    this.silent = options.silent || false;
-    this.browser      = new DeepSeekBrowser();
+    this.silent        = options.silent || false;
+    this.browser       = new DeepSeekBrowser();
     this.conversations = new Map(); // tabName -> ConversationManager
-    this.options      = options;
-    this._running     = false;
-    this.sandbox      = null; // Will be initialized on first command execution
+    this.options       = options;
+    this._running      = false;
+    this.sandbox       = null; // Will be initialized on first command execution
+    this.sessionLogger = null; // Set per-run from options or module singleton
   }
 
   get conversation() {
@@ -96,32 +98,40 @@ class DeepSeekAgent {
   async run(task, options = {}) {
     this._running   = true;
     const maxIter   = config.MAX_ITERATIONS;
+    const runStart  = Date.now();
 
-    // ── 0. Apply per-session working directory ──────────────────────────────
-    // This MUST happen before any tool is executed so that resolve() in tools.js
-    // uses the user's project path, not the gateway's own cwd.
+    // ── 0. Attach session logger ────────────────────────────────────────────
+    // Prefer a logger passed via options (created by server.js per session),
+    // fall back to the module-level singleton, or null (no structured logging).
+    const slog = options.sessionLogger || getSessionLogger() || null;
+    const tab  = options.tab   || this.browser.activeTab || 'default';
+    const model = options.model || 'default';
+
+    // ── 1. Apply per-session working directory ──────────────────────────────
     if (options.workingDir) {
       config.WORKING_DIR = options.workingDir;
+      slog?.logInfo(`Working directory set to: ${options.workingDir}`);
     }
 
-    // Switch tab and configure model
+    // ── 2. Switch tab / model ───────────────────────────────────────────────
     if (options.tab) {
       await this.browser.switchTab(options.tab);
+      slog?.logOrchestration('TAB_SWITCH', { tab: options.tab });
     }
     if (options.model) {
       await this.browser.selectModel(this.browser.activeTab, options.model);
+      slog?.logOrchestration('MODEL_SELECT', { tab, model });
     }
 
-    // ── 1. Snapshot working directory ──────────────────────────────────────
+    // ── 3. Snapshot working directory ──────────────────────────────────────
     const dirListing = this._getWorkingDirListing();
 
-    // ── 2. Build and send first message ───────────────────────────────────
-    logger.header(`[Tab: ${this.browser.activeTab}] Task: ${task.slice(0, 80)}${task.length > 80 ? '…' : ''}`);
+    // ── 4. Build and send first message ────────────────────────────────────
+    logger.header(`[Tab: ${tab}] Task: ${task.slice(0, 80)}${task.length > 80 ? '…' : ''}`);
 
     const conversation = this.conversation;
     let firstMsg;
-    
-    // Only build first message with system prompt if conversation is empty
+
     if (conversation.turnCount === 0) {
       firstMsg = conversation.buildFirstMessage(task, dirListing);
     } else {
@@ -129,84 +139,96 @@ class DeepSeekAgent {
       conversation.messages.push({ role: 'user', content: firstMsg });
     }
 
-    if (config.DEBUG) {
-      logger.dim('--- Message sent (truncated) ---');
-      logger.dim(firstMsg.slice(0, 600) + '...');
-    }
+    // Log the outgoing request
+    slog?.logRequest(firstMsg, { tab, model, round: 0 });
 
-    logger.info(`Sending task to DeepSeek (${this.browser.activeTab})...`);
+    logger.info(`Sending task to DeepSeek (${tab})...`);
     await this.browser.sendMessage(firstMsg);
 
-    // ── 3. Agent loop ──────────────────────────────────────────────────────
+    // ── 5. Agent loop ───────────────────────────────────────────────────────
     for (let iter = 1; iter <= maxIter; iter++) {
       logger.iteration(iter, maxIter);
+      slog?.logOrchestration('ITERATION_START', { iter, maxIter, tab, model });
 
-      // Wait for response from DeepSeek
-      const rawResponse = await this.browser.waitForResponse();
+      const responseStart = Date.now();
+      const rawResponse   = await this.browser.waitForResponse();
+      const responseDurMs = Date.now() - responseStart;
 
       if (!rawResponse || rawResponse.trim().length === 0) {
         logger.warn('Empty response received — retrying...');
-        await this.browser.sendMessage('Please continue. If you are waiting for input, proceed with your best judgement.');
+        slog?.logWarn('Empty response — retrying', { iter });
+        const retryMsg = 'Please continue. If you are waiting for input, proceed with your best judgement.';
+        slog?.logRequest(retryMsg, { tab, model, round: iter });
+        await this.browser.sendMessage(retryMsg);
         continue;
       }
 
-      if (config.DEBUG) {
-        logger.dim(`--- Raw response (${rawResponse.length} chars) ---`);
-        logger.dim(rawResponse.slice(0, 400));
-      }
+      // Log the full raw response
+      slog?.logResponse(rawResponse, { tab, model, durationMs: responseDurMs });
 
-      // Record the AI response in conversation history
+      // Record in conversation history
       conversation.addAssistantMessage(rawResponse);
 
       // Parse the response
       const parsed = parseResponse(rawResponse);
 
-      // ── Case 1: Tool call ──────────────────────────────────────────────
+      // ── Case 1: Tool call ────────────────────────────────────────────────
       if (parsed.type === 'tool_call') {
         logger.toolCall(parsed.name, parsed.args);
+        slog?.logToolCall(parsed.name, parsed.args, { tab, iteration: iter });
 
         let result;
         let isError = false;
+        const toolStart = Date.now();
 
         const isMutationTool = ['write_file', 'replace_in_file', 'append_to_file', 'delete_file', 'move_file', 'copy_file'].includes(parsed.name);
         const sigBefore = isMutationTool ? this._workspaceSignature() : null;
 
         try {
           result = await this._executeToolSafely(parsed.name, parsed.args);
+          const toolDurMs = Date.now() - toolStart;
           logger.toolResult(result);
+          slog?.logToolResult(parsed.name, result, { isError: false, durationMs: toolDurMs, iteration: iter });
 
           if (isMutationTool) {
             const sigAfter = this._workspaceSignature();
             if (sigBefore === sigAfter) {
+              const noChangeWarn = '⚠️ WARNING: Tool ran but no filesystem changes detected. Check path and content.';
               logger.warn(`Mutation tool ${parsed.name} executed but no filesystem changes detected.`);
-              result += '\n\n⚠️ WARNING: The tool ran successfully, but no file changes were detected on disk. Please verify if the target file path and matching content are correct.';
+              slog?.logWarn(`No-op mutation: ${parsed.name}`, { args: parsed.args });
+              result += '\n\n' + noChangeWarn;
             }
           }
         } catch (err) {
           result = `Error: ${err.message}`;
           isError = true;
+          const toolDurMs = Date.now() - toolStart;
           logger.toolResult(result, true);
+          slog?.logToolResult(parsed.name, result, { isError: true, durationMs: toolDurMs, iteration: iter });
+          slog?.logError(`Tool error: ${parsed.name}`, { error: err.message, args: parsed.args, iter });
         }
 
-        // Feed result back
         const feedbackMsg = conversation.addToolResult(parsed.name, result, isError);
+        slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'tool_feedback' });
         await this.browser.sendMessage(feedbackMsg);
         continue;
       }
 
-      // ── Case 2: Parse error ────────────────────────────────────────────
+      // ── Case 2: Parse error ──────────────────────────────────────────────
       if (parsed.type === 'error') {
         logger.warn(`Parse error: ${parsed.message}`);
+        slog?.logWarn(`Parse error at iter ${iter}`, { message: parsed.message, rawPreview: rawResponse.slice(0, 300) });
         const recovery = conversation.addToolResult(
           'SYSTEM',
           `Parse error: ${parsed.message}\n\nPlease try again with valid JSON in your tool call.`,
           true
         );
+        slog?.logRequest(recovery, { tab, model, round: iter, type: 'parse_error_recovery' });
         await this.browser.sendMessage(recovery);
         continue;
       }
 
-      // ── Case 3: Final response ─────────────────────────────────────────
+      // ── Case 3: Final response ───────────────────────────────────────────
       if (parsed.type === 'final') {
         const looksLikeToolCall = (
           /tool_call/i.test(parsed.content) ||
@@ -216,19 +238,26 @@ class DeepSeekAgent {
 
         if (looksLikeToolCall && conversation.turnCount <= maxIter - 2) {
           logger.warn('Response looks like a tool call but was not parsed — asking AI to retry format...');
+          slog?.logWarn('Malformed tool call — asking retry', { preview: parsed.content.slice(0, 200) });
           const retry = conversation.addToolResult(
             'SYSTEM',
             'Your response appeared to contain a tool call but it could not be parsed. ' +
             'Please respond with ONLY a ```tool_call code block and nothing else — no prose before or after it.',
             true
           );
+          slog?.logRequest(retry, { tab, model, round: iter, type: 'malformed_tool_retry' });
           await this.browser.sendMessage(retry);
           continue;
         }
 
         if (!this.silent) logger.finalOutput(parsed.content);
+        slog?.logOrchestration('FINAL_RESPONSE', {
+          tab, model,
+          totalIterations : iter,
+          totalDurationMs : Date.now() - runStart,
+          responseLen     : parsed.content.length,
+        });
 
-        // Optionally save conversation log
         if (this.options.saveLog) {
           await this._saveConversationLog(task, parsed.content);
         }
@@ -238,10 +267,11 @@ class DeepSeekAgent {
       }
     }
 
-    // ── Hit max iterations ─────────────────────────────────────────────────
+    // ── Hit max iterations ───────────────────────────────────────────────────
     this._running = false;
     const warn = `⚠ Reached maximum iterations (${maxIter}). The task may be incomplete.`;
     logger.warn(warn);
+    slog?.logWarn('Max iterations reached', { maxIter, totalDurationMs: Date.now() - runStart });
     return warn;
   }
 

@@ -397,7 +397,7 @@ const TOOLS = {
   // },
 
   run_command: {
-    description: 'Execute a shell command (sandboxed). Runs in the working directory by default.',
+    description: 'Execute a shell command. Runs in the working directory by default.',
     parameters: {
       command: { type: 'string', required: true, description: 'Shell command to run' },
       cwd: { type: 'string', required: false, description: 'Working directory' },
@@ -405,13 +405,22 @@ const TOOLS = {
       env: { type: 'object', required: false, description: 'Extra environment variables' },
     },
     async execute({ command, cwd, timeout = 60000, env = {} }) {
-      // This function will be called from the agent – we need access to the agent's sandbox.
-      // Since the tools module doesn't have the sandbox reference, we throw a special error
-      // that the agent will catch and reroute. Alternatively, you can pass the sandbox via
-      // a global variable – but cleaner: the agent will override this method.
-      const err = new Error('run_command must be executed through the SecuritySandbox');
-      err.code = 'NEED_SANDBOX';
-      throw err;
+      const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
+      try {
+        const output = execSync(command, {
+          cwd: workDir, encoding: 'utf8', timeout,
+          maxBuffer: 20 * 1024 * 1024,
+          env: { ...process.env, ...env },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        return truncate((output || '').trim() || '(command completed with no output)');
+      } catch (err) {
+        const stdout = (err.stdout || '').trim();
+        const stderr = (err.stderr || '').trim();
+        const combined = [stdout && `STDOUT:\n${stdout}`, stderr && `STDERR:\n${stderr}`]
+          .filter(Boolean).join('\n\n');
+        throw new Error(`Command failed (exit ${err.status}):\n${truncate(combined || err.message)}`);
+      }
     },
   },
 
