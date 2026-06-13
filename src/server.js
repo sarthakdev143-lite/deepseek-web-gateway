@@ -99,7 +99,7 @@ app.post('/session/create', async (req, res) => {
 
 // POST /session/:id/chat — run a task prompt
 app.post('/session/:id/chat', validateSession, async (req, res) => {
-  const { prompt, tab, model } = req.body;
+  const { prompt, tab, model, readOnly } = req.body;
   const { agent, healthMonitor, workingDir, sessionLogger } = req.session;
 
   if (!prompt) {
@@ -118,11 +118,11 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
 
       if (healthMonitor) {
         result = await healthMonitor.executeWithProtection(
-          () => agent.run(prompt, { tab, model, workingDir, sessionLogger }),
+          () => agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly }),
           () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
         );
       } else {
-        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger });
+        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly });
       }
 
       sessionLogger?.logOrchestration('CHAT_COMPLETE', { tab, model, resultLen: (result || '').length });

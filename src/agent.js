@@ -7,7 +7,8 @@ const os                           = require('os');
 const config                       = require('./config');
 const logger                       = require('./logger');
 const DeepSeekBrowser              = require('./browser');
-const { executeTool }              = require('./tools');
+const { executeTool,
+        setReadOnly }              = require('./tools');
 const { parseResponse,
         formatToolResult,
         READ_ONLY_TOOLS }    = require('./parser');
@@ -119,6 +120,15 @@ class DeepSeekAgent {
     if (options.workingDir) {
       config.WORKING_DIR = options.workingDir;
       slog?.logInfo(`Working directory set to: ${options.workingDir}`);
+    }
+
+    // ── 1b. Apply read-only mode ────────────────────────────────────────────
+    if (options.readOnly) {
+      setReadOnly(true);
+      logger.warn('⛔ Read-only mode active — write/command tools are blocked.');
+      slog?.logOrchestration('READ_ONLY_MODE', { active: true });
+    } else {
+      setReadOnly(false); // reset in case last session had it enabled
     }
 
     // ── 2. Switch tab / model ───────────────────────────────────────────────

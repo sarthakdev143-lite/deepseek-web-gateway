@@ -9,6 +9,17 @@ const http = require('http');
 const https = require('https');
 const config = require('./config');
 
+// ── Read-only mode guard ───────────────────────────────────────────
+let _readOnly = false;
+const MUTATION_TOOLS = new Set([
+  'write_file', 'replace_in_file', 'append_to_file', 'delete_file',
+  'move_file', 'copy_file', 'run_command', 'start_server',
+]);
+
+function setReadOnly(val) { _readOnly = Boolean(val); }
+function isReadOnly()     { return _readOnly; }
+
+
 const activeServers = new Map(); // name -> { proc, port, command, workDir, getLogs }
 
 let sanitizeCommand;
@@ -757,7 +768,14 @@ async function executeTool(name, args) {
     const available = Object.keys(TOOLS).join(', ');
     throw new Error(`Unknown tool: "${name}". Available: ${available}`);
   }
+  // ── Read-only guard: block mutation tools when --read-only is active ─────
+  if (_readOnly && MUTATION_TOOLS.has(name)) {
+    throw new Error(
+      `⛔ Read-only mode is active. Tool "${name}" is not permitted.\n` +
+      `Remove --read-only to allow filesystem and command mutations.`
+    );
+  }
   return await tool.execute(args);
 }
 
-module.exports = { TOOLS, executeTool, getToolDescriptions, stopAllServers };
+module.exports = { TOOLS, executeTool, getToolDescriptions, stopAllServers, setReadOnly, isReadOnly };
