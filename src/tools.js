@@ -415,6 +415,15 @@ const TOOLS = {
       env: { type: 'object', required: false, description: 'Extra environment variables' },
     },
     async execute({ command, cwd, timeout = 60000, env = {} }) {
+      // Prevent agent suicide commands
+      const suicidePatterns = [
+        /taskkill.*\bnode(\.exe)?\b/i,
+        /\b(killall|pkill|pkill\.exe|kill)\b.*\bnode(\.exe)?\b/i,
+      ];
+      if (suicidePatterns.some(regex => regex.test(command))) {
+        throw new Error(`Security Error: Command rejected. Attempting to kill Node.js processes globally (${command}) would terminate the SeekCode agent and gateway processes. Please kill the target application by its specific port or PID instead, or use the start_server/stop_server tools.`);
+      }
+
       const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
       try {
         const output = execSync(command, {
