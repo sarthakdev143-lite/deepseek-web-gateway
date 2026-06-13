@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const http = require('http');
 const https = require('https');
@@ -162,6 +163,19 @@ const TOOLS = {
     async execute({ path: filePath, content }) {
       const abs = resolve(filePath);
       await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+
+      // ── Idempotency: skip write if file content is already identical ──────────
+      if (fs.existsSync(abs)) {
+        try {
+          const existing = await fs.promises.readFile(abs, 'utf8');
+          const hashNew = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+          const hashOld = crypto.createHash('sha256').update(existing, 'utf8').digest('hex');
+          if (hashNew === hashOld) {
+            return `✓ No-op — file content unchanged (${formatBytes(Buffer.byteLength(content, 'utf8'))}) → ${filePath}`;
+          }
+        } catch { /* fall through to normal write */ }
+      }
+
       await atomicWriteFile(abs, content);
       const lineCount = content.split('\n').length;
       await logChange('write', filePath, `wrote ${lineCount} lines`);

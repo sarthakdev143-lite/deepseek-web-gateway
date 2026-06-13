@@ -9,7 +9,8 @@ const logger                       = require('./logger');
 const DeepSeekBrowser              = require('./browser');
 const { executeTool }              = require('./tools');
 const { parseResponse,
-        formatToolResult }         = require('./parser');
+        formatToolResult,
+        READ_ONLY_TOOLS }    = require('./parser');
 const { ConversationManager }      = require('./prompt');
 const { getSessionLogger }         = require('./session-logger');
 
@@ -178,6 +179,62 @@ class DeepSeekAgent {
 
       // Parse the response
       const parsed = parseResponse(rawResponse);
+
+      // ── Case 0: Multiple tool calls — parallel where safe ──────────────────
+      if (parsed.type === 'tool_calls') {
+        const calls = parsed.calls;
+        logger.info(`⚡ Parallel batch: ${calls.length} tool call(s) — executing...`);
+        slog?.logOrchestration('PARALLEL_TOOL_BATCH', { count: calls.length, tools: calls.map(c => c.name), iter });
+
+        const readCalls   = calls.filter(c =>  READ_ONLY_TOOLS.has(c.name));
+        const mutateCalls = calls.filter(c => !READ_ONLY_TOOLS.has(c.name));
+
+        // Results array aligned with original call order
+        const results = new Array(calls.length);
+
+        // 1. Execute read-only tools in parallel
+        await Promise.all(readCalls.map(async call => {
+          const idx = calls.indexOf(call);
+          const tStart = Date.now();
+          logger.toolCall(`[parallel] ${call.name}`, call.args);
+          slog?.logToolCall(call.name, call.args, { tab, iteration: iter, parallel: true });
+          try {
+            const result = await this._executeToolSafely(call.name, call.args);
+            slog?.logToolResult(call.name, result, { isError: false, durationMs: Date.now() - tStart, iteration: iter });
+            results[idx] = { call, result, isError: false };
+          } catch (err) {
+            slog?.logToolResult(call.name, err.message, { isError: true, durationMs: Date.now() - tStart, iteration: iter });
+            results[idx] = { call, result: `Error: ${err.message}`, isError: true };
+          }
+        }));
+
+        // 2. Execute mutation tools sequentially (order matters)
+        for (const call of mutateCalls) {
+          const idx = calls.indexOf(call);
+          const tStart = Date.now();
+          logger.toolCall(`[sequential] ${call.name}`, call.args);
+          slog?.logToolCall(call.name, call.args, { tab, iteration: iter, parallel: false });
+          try {
+            const result = await this._executeToolSafely(call.name, call.args);
+            slog?.logToolResult(call.name, result, { isError: false, durationMs: Date.now() - tStart, iteration: iter });
+            results[idx] = { call, result, isError: false };
+          } catch (err) {
+            slog?.logToolResult(call.name, err.message, { isError: true, durationMs: Date.now() - tStart, iteration: iter });
+            results[idx] = { call, result: `Error: ${err.message}`, isError: true };
+          }
+        }
+
+        // 3. Send all results back in one message
+        const combined = results
+          .filter(Boolean)
+          .map(({ call, result, isError }) => formatToolResult(call.name, result, isError))
+          .join('\n\n');
+
+        const feedbackMsg = conversation.addToolResult('BATCH_RESULTS', combined, false);
+        slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'parallel_batch_result' });
+        await this.browser.sendMessage(feedbackMsg);
+        continue;
+      }
 
       // ── Case 1: Tool call ────────────────────────────────────────────────
       if (parsed.type === 'tool_call') {

@@ -78,6 +78,7 @@ class DeepSeekBrowser {
     this.adaptiveSelectors = new Map(); // tabName -> AdaptiveSelector object
     this.activeTab = 'default';
     this._closed = false;
+    this._crashRecovering = new Set(); // tabs currently in crash recovery
   }
 
   get page() {
@@ -147,6 +148,9 @@ class DeepSeekBrowser {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
+    // Attach crash / close recovery
+    this._attachCrashRecovery('default', defaultPage);
+
     // Inject saved cookies
     if (cookies.length > 0) {
       await this.context.addCookies(cookies);
@@ -167,6 +171,57 @@ class DeepSeekBrowser {
     logger.success('Browser ready!');
   }
 
+  // ── Crash / Close Recovery ─────────────────────────────────────────────────
+
+  /**
+   * Attach crash and unexpected-close listeners to a Playwright page.
+   * On crash: silently recreate the tab and navigate back to DeepSeek.
+   */
+  _attachCrashRecovery(tabName, page) {
+    const recover = async (reason) => {
+      if (this._closed) return;
+      if (this._crashRecovering.has(tabName)) return; // already recovering
+      this._crashRecovering.add(tabName);
+
+      logger.warn(`⚠️  Page crash/close detected on tab "${tabName}" (${reason}) — auto-recovering...`);
+
+      try {
+        // Discard the dead page
+        this.pages.delete(tabName);
+        this.adaptiveSelectors.delete(tabName);
+
+        // Open a fresh page in the same persistent context
+        const newPage = await this.context.newPage();
+        await newPage.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        });
+        this.pages.set(tabName, newPage);
+
+        // Re-attach listeners on the new page
+        this._attachCrashRecovery(tabName, newPage);
+
+        // Navigate back and verify login (cookies persist in the context)
+        await this._navigate(config.DEEPSEEK_URL);
+        await newPage.waitForTimeout(2_000);
+        const stillLoggedIn = !(await this._ensureLoggedIn());
+
+        if (stillLoggedIn) {
+          logger.success(`✅  Tab "${tabName}" recovered successfully.`);
+        } else {
+          logger.warn(`Tab "${tabName}" recovered but login was required again.`);
+        }
+      } catch (err) {
+        logger.error(`❌  Recovery failed for tab "${tabName}": ${err.message}`);
+      } finally {
+        this._crashRecovering.delete(tabName);
+      }
+    };
+
+    page.on('crash', () => recover('crash'));
+    // 'close' fires on unexpected closes (not on intentional context.close())
+    page.on('close', () => { if (!this._closed) recover('unexpected close'); });
+  }
+
   async close() {
     if (this._closed) return;
     this._closed = true;
@@ -185,6 +240,8 @@ class DeepSeekBrowser {
       });
       this.pages.set(tabName, newPage);
       this.activeTab = tabName;
+      // Attach crash recovery on new tab too
+      this._attachCrashRecovery(tabName, newPage);
       // Navigate and start new chat
       await this._navigate(config.DEEPSEEK_URL);
       await this.newChat();

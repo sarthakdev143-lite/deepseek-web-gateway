@@ -1,10 +1,41 @@
 // src/parser.js — Parse DeepSeek's text responses to extract tool calls
 'use strict';
 
+// Read-only tools that are safe to run in parallel
+const READ_ONLY_TOOLS = new Set([
+  'read_file', 'list_directory', 'search_files', 'search_in_file',
+  'http_get', 'get_file_info', 'find_file', 'get_diagnostics',
+]);
+
+/**
+ * Extract ALL tool_call fenced blocks from text.
+ * Returns an array of { name, args } objects (may be empty).
+ */
+function parseAllToolCalls(text) {
+  const results = [];
+  const fenceRe = /```tool_call\s*([\s\S]*?)```/gi;
+  let m;
+  while ((m = fenceRe.exec(text)) !== null) {
+    const raw = m[1].trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = attemptJsonFix(raw);
+    }
+    if (!parsed) continue;
+    const name = parsed.name || parsed.tool || parsed.function;
+    const args = parsed.args || parsed.arguments || parsed.parameters || parsed.input || {};
+    if (name && typeof name === 'string') results.push({ name, args });
+  }
+  return results;
+}
+
 /**
  * Parse a raw DeepSeek response string.
  *
  * Returns one of:
+ *   { type: 'tool_calls', calls: [{name, args}], raw: string }  ← NEW (multiple)
  *   { type: 'tool_call', name: string, args: object, raw: string }
  *   { type: 'final',     content: string,            raw: string }
  *   { type: 'error',     message: string,            raw: string }
@@ -34,24 +65,23 @@ function parseResponse(rawText) {
     }
   }
 
-  // ── Strategy 1 (PRIMARY): ```tool_call fenced code block ─────────────────
+  // ── Strategy 1 (PRIMARY): ```tool_call fenced code block(s) ──────────────
+  // Extract ALL tool_call blocks — support parallel multi-tool responses
+  const allCalls = parseAllToolCalls(text);
+  if (allCalls.length > 1) {
+    return { type: 'tool_calls', calls: allCalls, raw: rawText };
+  }
+  if (allCalls.length === 1) {
+    return { type: 'tool_call', name: allCalls[0].name, args: allCalls[0].args, raw: rawText };
+  }
+
+  // ── Strategy 1b: single fenced block with JSON parse error reporting ───────
   const fencedMatch = text.match(/```tool_call\s*([\s\S]*?)```/i);
   if (fencedMatch) {
     const raw = fencedMatch[1].trim();
     try {
-      const parsed = JSON.parse(raw);
-      const name   = parsed.name || parsed.tool || parsed.function;
-      const args   = parsed.args || parsed.arguments || parsed.parameters || parsed.input || {};
-      if (name && typeof name === 'string') {
-        return { type: 'tool_call', name, args, raw: rawText };
-      }
+      JSON.parse(raw); // already handled above — this catches invalid JSON only
     } catch (e) {
-      const fixed = attemptJsonFix(raw);
-      if (fixed) {
-        const name = fixed.name || fixed.tool || fixed.function;
-        const args = fixed.args || fixed.arguments || fixed.parameters || fixed.input || {};
-        if (name) return { type: 'tool_call', name, args, raw: rawText };
-      }
       return {
         type    : 'error',
         message : 'tool_call block had invalid JSON: ' + e.message + '\nContent: ' + raw.slice(0, 300),
@@ -274,6 +304,8 @@ function isAskingQuestion(text) {
 
 module.exports = {
   parseResponse,
+  parseAllToolCalls,
+  READ_ONLY_TOOLS,
   formatToolResult,
   stripThinkingBlocks,
   isAskingQuestion,

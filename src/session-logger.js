@@ -7,6 +7,17 @@ const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 
+// Redact secrets from log output
+let _redact, _redactObj;
+try {
+  const r = require(path.join(__dirname, '../../seekcode/src/utils/redact'));
+  _redact    = r.redact;
+  _redactObj = r.redactObject;
+} catch {
+  _redact    = s => s;
+  _redactObj = o => o;
+}
+
 // ─────────────────────────────────────────────
 //  Log directory
 // ─────────────────────────────────────────────
@@ -87,44 +98,47 @@ class SessionLogger {
 
   /** Called when the orchestrator sends a prompt to the model */
   logRequest(prompt, { tab, model, round = 0 } = {}) {
-    this._write('REQUEST', { tab, model, round, promptLen: prompt.length, promptPreview: trunc(prompt, 800) });
+    const safePrompt = _redact(prompt);
+    this._write('REQUEST', { tab, model, round, promptLen: prompt.length, promptPreview: trunc(safePrompt, 800) });
     console.log(
       `\n${c('cyan','┌─')}${cb('cyan','── REQUEST ')}${c('gray',`[${tab || 'default'}/${model || 'default'}]`)}` +
       c('gray', ` round=${round} seq=${this._seq}`) + '\n' +
       c('gray', `  prompt length : ${prompt.length} chars`) + '\n' +
-      c('gray', `  preview       : ${trunc(prompt, 200)}`) + '\n' +
+      c('gray', `  preview       : ${trunc(safePrompt, 200)}`) + '\n' +
       c('cyan', '└─────────────────────────────────────────────────────────')
     );
   }
 
   /** Called when the model returns a full response */
   logResponse(text, { tab, model, continueRounds = 0, durationMs } = {}) {
-    this._write('RESPONSE', { tab, model, continueRounds, durationMs, responseLen: text.length, responsePreview: trunc(text, 800) });
+    const safeText = _redact(text);
+    this._write('RESPONSE', { tab, model, continueRounds, durationMs, responseLen: text.length, responsePreview: trunc(safeText, 800) });
     const dur = durationMs != null ? ` in ${(durationMs / 1000).toFixed(1)}s` : '';
     console.log(
       `\n${c('lgreen','┌─')}${cb('lgreen','── RESPONSE ')}${c('gray',`[${tab || 'default'}/${model || 'default'}]`)}` +
       c('gray', dur) + (continueRounds ? c('lyellow', ` (${continueRounds} continuations)`) : '') + '\n' +
       c('gray', `  length  : ${text.length} chars`) + '\n' +
-      c('gray', `  preview : ${trunc(text, 300)}`) + '\n' +
+      c('gray', `  preview : ${trunc(safeText, 300)}`) + '\n' +
       c('lgreen', '└─────────────────────────────────────────────────────────')
     );
   }
 
   /** Called when the model emits a tool call */
-  logToolCall(name, args, { tab, iteration } = {}) {
-    this._write('TOOL_CALL', { tab, iteration, toolName: name, args });
+  logToolCall(name, args, { tab, iteration, parallel } = {}) {
+    const safeArgs = _redactObj(args);
+    this._write('TOOL_CALL', { tab, iteration, toolName: name, args: safeArgs, parallel: !!parallel });
     console.log(
       `\n  ${cb('magenta','⚡ TOOL CALL')} ${c('cyan', `→ ${name}`)}` +
-      c('gray', ` [iter=${iteration ?? '?'} tab=${tab || 'default'}]`)
+      c('gray', ` [iter=${iteration ?? '?'} tab=${tab || 'default'}${parallel ? ' PARALLEL' : ''}]`)
     );
-    const preview = JSON.stringify(args, null, 2);
+    const preview = JSON.stringify(safeArgs, null, 2);
     preview.split('\n').forEach(l => console.log(`    ${c('gray', l)}`));
   }
 
   /** Called after a tool executes with its result */
   logToolResult(name, result, { isError = false, durationMs, iteration } = {}) {
-    const resultStr = String(result);
-    this._write('TOOL_RESULT', { toolName: name, isError, durationMs, iteration, resultLen: resultStr.length, resultPreview: trunc(resultStr, 500) });
+    const resultStr = _redact(String(result));
+    this._write('TOOL_RESULT', { toolName: name, isError, durationMs, iteration, resultLen: String(result).length, resultPreview: trunc(resultStr, 500) });
     const icon  = isError ? c('lred', '  ✗ Result') : c('lgreen', '  ✓ Result');
     const dur   = durationMs != null ? c('gray', ` (${durationMs}ms)`) : '';
     console.log(`${icon} ${c('gray', `[${name}]`)}${dur}:`);
