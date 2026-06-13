@@ -8,6 +8,16 @@ const http = require('http');
 const https = require('https');
 const config = require('./config');
 
+const activeServers = new Map(); // name -> { proc, port, command, workDir, getLogs }
+
+let sanitizeCommand;
+try {
+  sanitizeCommand = require(path.join(__dirname, '../../seekcode/src/utils/platformCommands')).sanitizeCommand;
+} catch (e) {
+  sanitizeCommand = cmd => cmd;
+}
+
+
 // ─────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────
@@ -534,6 +544,147 @@ const TOOLS = {
     },
   },
 
+  // ── HTTP GET ────────────────────────────────────────────────────────────────
+  http_get: {
+    description: 'Perform a HTTP GET request. Useful for health checking local servers or calling local APIs.',
+    parameters: {
+      url: { type: 'string', required: true, description: 'The URL to request (e.g. http://localhost:3000/api/health)' },
+      timeout: { type: 'number', required: false, description: 'Timeout in ms (default: 5000)' }
+    },
+    async execute({ url, timeout = 5000 }) {
+      return new Promise((resolve_p, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        const req = client.get(url, { timeout }, res => {
+          let data = '';
+          res.on('data', chunk => { data += chunk; });
+          res.on('end', () => {
+            resolve_p(`HTTP ${res.statusCode}\n\n${data.slice(0, 1000)}`);
+          });
+        });
+        req.on('error', err => reject(new Error(`HTTP GET failed: ${err.message}`)));
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error(`HTTP GET timed out after ${timeout}ms`));
+        });
+      });
+    }
+  },
+
+  // ── Start Server ───────────────────────────────────────────────────────────
+  start_server: {
+    description: 'Start a local server in the background (e.g. npm run dev, nest start). Returns immediately after checking port or spawn.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'A unique name for this server process' },
+      command: { type: 'string', required: true, description: 'The command to run to start the server' },
+      cwd: { type: 'string', required: false, description: 'Working directory' },
+      port: { type: 'number', required: false, description: 'The port the server is expected to listen on (optional)' },
+      ready_timeout: { type: 'number', required: false, description: 'Max time in ms to wait for the port to open (default: 15000)' }
+    },
+    async execute({ name, command, cwd, port, ready_timeout = 15000 }) {
+      const { spawn } = require('child_process');
+      const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
+
+      if (activeServers.has(name)) {
+        const old = activeServers.get(name);
+        try { old.proc.kill('SIGKILL'); } catch {}
+        activeServers.delete(name);
+      }
+
+      const safeCommand = sanitizeCommand(command);
+
+      const proc = spawn(safeCommand, {
+        cwd: workDir,
+        shell: true,
+        detached: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env }
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', data => {
+        stdout += data.toString();
+        if (stdout.length > 10000) stdout = stdout.slice(-10000);
+      });
+
+      proc.stderr.on('data', data => {
+        stderr += data.toString();
+        if (stderr.length > 10000) stderr = stderr.slice(-10000);
+      });
+
+      activeServers.set(name, { proc, port, command, workDir, getLogs: () => ({ stdout, stderr }) });
+
+      if (port) {
+        const checkPortOpen = async (p, t) => {
+          const start = Date.now();
+          while (Date.now() - start < t) {
+            if (proc.exitCode !== null) {
+              throw new Error(`Process exited with code ${proc.exitCode}. Stderr: ${stderr}`);
+            }
+            try {
+              await new Promise((resolve_c, reject_c) => {
+                const socket = require('net').createConnection(p, 'localhost', () => {
+                  socket.end();
+                  resolve_c();
+                });
+                socket.on('error', reject_c);
+                socket.setTimeout(1000, () => { socket.destroy(); reject_c(new Error('timeout')); });
+              });
+              return true;
+            } catch (err) {
+              await new Promise(r => setTimeout(r, 500));
+            }
+          }
+          return false;
+        };
+
+        try {
+          const ok = await checkPortOpen(port, ready_timeout);
+          if (!ok) {
+            throw new Error(`Port ${port} did not open within ${ready_timeout}ms`);
+          }
+          return `Server "${name}" started and listening on port ${port}.`;
+        } catch (err) {
+          try { proc.kill('SIGKILL'); } catch {}
+          activeServers.delete(name);
+          throw new Error(`Failed to start server "${name}": ${err.message}. Logs:\n${stderr}`);
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 2000));
+      if (proc.exitCode !== null) {
+        activeServers.delete(name);
+        throw new Error(`Process exited immediately with code ${proc.exitCode}. Logs:\n${stderr}`);
+      }
+
+      return `Server "${name}" started in background.`;
+    }
+  },
+
+  // ── Stop Server ────────────────────────────────────────────────────────────
+  stop_server: {
+    description: 'Stop a running background server process.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'The unique name of the server to stop' }
+    },
+    async execute({ name }) {
+      if (!activeServers.has(name)) {
+        return `No server named "${name}" is currently running.`;
+      }
+      const { proc } = activeServers.get(name);
+      try {
+        proc.kill('SIGTERM');
+        await new Promise(r => setTimeout(r, 1000));
+        if (proc.exitCode === null) {
+          proc.kill('SIGKILL');
+        }
+      } catch {}
+      activeServers.delete(name);
+      return `Server "${name}" stopped.`;
+    }
+  },
+
   // ── Change Log ──────────────────────────────────────────────────────────────
   get_change_log: {
     description: 'Returns a list of all file changes made during this session.',
@@ -556,6 +707,17 @@ const TOOLS = {
 //  Tool registry helpers
 // ─────────────────────────────────────────────
 
+async function stopAllServers() {
+  for (const [name, server] of activeServers.entries()) {
+    try {
+      server.proc.kill('SIGTERM');
+      await new Promise(r => setTimeout(r, 500));
+      if (server.proc.exitCode === null) server.proc.kill('SIGKILL');
+    } catch {}
+  }
+  activeServers.clear();
+}
+
 function getToolDescriptions() {
   return Object.entries(TOOLS).map(([name, tool]) => {
     const params = Object.entries(tool.parameters || {})
@@ -575,4 +737,4 @@ async function executeTool(name, args) {
   return await tool.execute(args);
 }
 
-module.exports = { TOOLS, executeTool, getToolDescriptions };
+module.exports = { TOOLS, executeTool, getToolDescriptions, stopAllServers };

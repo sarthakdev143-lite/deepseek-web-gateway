@@ -88,6 +88,13 @@ class DeepSeekAgent {
         logger.warn(`Sandbox cleanup failed: ${err.message}`);
       }
     }
+    // Clean up background servers started by the agent
+    try {
+      const { stopAllServers } = require('./tools');
+      await stopAllServers();
+    } catch (err) {
+      logger.warn(`Failed to stop background servers: ${err.message}`);
+    }
     await this.browser.close();
   }
 
