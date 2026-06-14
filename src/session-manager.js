@@ -26,6 +26,12 @@ class SessionManager {
       const stale = [];
 
       for (const [id, session] of this.sessions.entries()) {
+        // ── CRITICAL: never kill a session that has an active in-flight request
+        if ((session.activeRequests || 0) > 0) {
+          // Refresh lastAccessed so it doesn't expire while work is happening
+          session.lastAccessed = Date.now();
+          continue;
+        }
         const lastActivity = session.lastAccessed || session.createdAt;
         if (now - lastActivity > this.sessionTTL) stale.push(id);
       }
@@ -56,11 +62,12 @@ class SessionManager {
 
     const sessionId = this.generateSessionId();
     const session   = {
-      id           : sessionId,
+      id             : sessionId,
       agent,
-      createdAt    : Date.now(),
-      lastAccessed : Date.now(),
-      metadata     : {},
+      createdAt      : Date.now(),
+      lastAccessed   : Date.now(),
+      activeRequests : 0,   // ← guard: don't kill sessions with in-flight requests
+      metadata       : {},
     };
 
     this.sessions.set(sessionId, session);
@@ -70,12 +77,43 @@ class SessionManager {
     return sessionId;
   }
 
+  /**
+   * Signal that a request has started on this session.
+   * Auto-cleanup will not destroy sessions with activeRequests > 0.
+   */
+  incrementActiveRequests(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.activeRequests = (session.activeRequests || 0) + 1;
+    session.lastAccessed = Date.now(); // reset TTL clock
+  }
+
+  /**
+   * Signal that a request has finished on this session.
+   * Also refreshes lastAccessed so the TTL window starts from now.
+   */
+  decrementActiveRequests(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.activeRequests = Math.max(0, (session.activeRequests || 1) - 1);
+    session.lastAccessed = Date.now(); // reset TTL after request ends
+  }
+
+  /**
+   * Called periodically during a long-running request to keep lastAccessed fresh
+   * so the session is never considered stale while work is actively happening.
+   */
+  heartbeat(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (session) session.lastAccessed = Date.now();
+  }
+
   getSession(sessionId) {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
 
-    // Lazy expiration check
-    if (Date.now() - session.lastAccessed > this.sessionTTL) {
+    // Lazy expiration check — but NEVER expire sessions with active requests
+    if ((session.activeRequests || 0) === 0 && Date.now() - session.lastAccessed > this.sessionTTL) {
       this.destroySession(sessionId).catch(() => {});
       return null;
     }

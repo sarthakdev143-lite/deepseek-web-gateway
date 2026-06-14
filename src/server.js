@@ -90,7 +90,13 @@ app.post('/session/create', async (req, res) => {
     session.sessionLogger = sessionLogger;
     sessionManager.updateMetadata(sessionId, { createdAt: new Date().toISOString(), workingDir });
 
-    res.json({ sessionId, status: 'ready', ttl: sessionManager.sessionTTL });
+    // Return the log file path so clients can record it in their own traces
+    res.json({
+      sessionId,
+      status        : 'ready',
+      ttl           : sessionManager.sessionTTL,
+      sessionLogPath: sessionLogger.path,
+    });
   } catch (err) {
     logger.error(`Session creation failed: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -101,6 +107,7 @@ app.post('/session/create', async (req, res) => {
 app.post('/session/:id/chat', validateSession, async (req, res) => {
   const { prompt, tab, model, readOnly } = req.body;
   const { agent, healthMonitor, workingDir, sessionLogger } = req.session;
+  const sessionId = req.params.id;
 
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
@@ -117,6 +124,18 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
 
   // Queue tasks sequentially per tab to prevent bot-detection bans
   const executeChat = () => new Promise(async (resolve, reject) => {
+    // ── CRITICAL: mark this session as having an active in-flight request.
+    // Auto-cleanup will skip sessions where activeRequests > 0, preventing
+    // the TTL from killing a browser that is actively doing work.
+    sessionManager.incrementActiveRequests(sessionId);
+
+    // ── Heartbeat: refresh lastAccessed every 60s during long-running runs
+    // so the session TTL clock never considers this session stale.
+    const heartbeatInterval = setInterval(
+      () => sessionManager.heartbeat(sessionId),
+      60_000
+    );
+
     try {
       sessionLogger?.logOrchestration('CHAT_REQUEST', { tab, model, promptLen: (prompt || '').length });
       let result;
@@ -134,10 +153,14 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
       res.json({ text: result, toolCalls: [] });
       resolve();
     } catch (err) {
-      logger.error(`Chat failed for session ${req.params.id} (tab: ${tabName}): ${err.message}`);
+      logger.error(`Chat failed for session ${sessionId} (tab: ${tabName}): ${err.message}`);
       sessionLogger?.logError(`Chat failed: ${err.message}`, { tab, model });
       res.status(500).json({ error: err.message });
       reject(err);
+    } finally {
+      // Always clear heartbeat and decrement active request counter
+      clearInterval(heartbeatInterval);
+      sessionManager.decrementActiveRequests(sessionId);
     }
   });
 
