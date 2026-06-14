@@ -161,7 +161,7 @@ class DeepSeekAgent {
     slog?.logRequest(firstMsg, { tab, model, round: 0 });
 
     logger.info(`Sending task to DeepSeek (${tab})...`);
-    await this.browser.sendMessage(firstMsg);
+    await this.browser.sendMessage(firstMsg, tab);
 
     // ── 5. Agent loop ───────────────────────────────────────────────────────
     for (let iter = 1; iter <= maxIter; iter++) {
@@ -169,7 +169,7 @@ class DeepSeekAgent {
       slog?.logOrchestration('ITERATION_START', { iter, maxIter, tab, model });
 
       const responseStart = Date.now();
-      const rawResponse   = await this.browser.waitForResponse();
+      const rawResponse   = await this.browser.waitForResponse(tab);
       const responseDurMs = Date.now() - responseStart;
 
       if (!rawResponse || rawResponse.trim().length === 0) {
@@ -177,7 +177,7 @@ class DeepSeekAgent {
         slog?.logWarn('Empty response — retrying', { iter });
         const retryMsg = 'Please continue. If you are waiting for input, proceed with your best judgement.';
         slog?.logRequest(retryMsg, { tab, model, round: iter });
-        await this.browser.sendMessage(retryMsg);
+        await this.browser.sendMessage(retryMsg, tab);
         continue;
       }
 
@@ -242,7 +242,7 @@ class DeepSeekAgent {
 
         const feedbackMsg = conversation.addToolResult('BATCH_RESULTS', combined, false);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'parallel_batch_result' });
-        await this.browser.sendMessage(feedbackMsg);
+        await this.browser.sendMessage(feedbackMsg, tab);
         continue;
       }
 
@@ -284,7 +284,7 @@ class DeepSeekAgent {
 
         const feedbackMsg = conversation.addToolResult(parsed.name, result, isError);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'tool_feedback' });
-        await this.browser.sendMessage(feedbackMsg);
+        await this.browser.sendMessage(feedbackMsg, tab);
         continue;
       }
 
@@ -298,7 +298,7 @@ class DeepSeekAgent {
           true
         );
         slog?.logRequest(recovery, { tab, model, round: iter, type: 'parse_error_recovery' });
-        await this.browser.sendMessage(recovery);
+        await this.browser.sendMessage(recovery, tab);
         continue;
       }
 
@@ -320,7 +320,7 @@ class DeepSeekAgent {
             true
           );
           slog?.logRequest(retry, { tab, model, round: iter, type: 'malformed_tool_retry' });
-          await this.browser.sendMessage(retry);
+          await this.browser.sendMessage(retry, tab);
           continue;
         }
 
@@ -405,6 +405,47 @@ class DeepSeekAgent {
   // ── Secure Tool Execution with Sandbox ─────────────────────────────────────
 
   async _executeToolSafely(toolName, args) {
+    const tab = this.browser.activeTab || 'default';
+    
+    if (toolName === 'upload_file') {
+      const { path: filePath } = args;
+      const absPath = require('path').isAbsolute(filePath) ? filePath : require('path').resolve(config.WORKING_DIR, filePath);
+      if (!require('fs').existsSync(absPath)) {
+        throw new Error(`File not found: ${filePath}`);
+      }
+      
+      logger.info(`Uploading file ${filePath} directly via browser...`);
+      const res = await this.browser.uploadFile(absPath, tab);
+      if (res.uploaded) {
+        return `✓ File "${res.fileName}" has been successfully uploaded to the DeepSeek chat context. You can now refer to it in your queries.`;
+      } else {
+        throw new Error(`Browser failed to upload the file. Please try reading it using read_file.`);
+      }
+    }
+    
+    if (toolName === 'read_file') {
+      const { path: filePath, start_line, end_line } = args;
+      const absPath = require('path').isAbsolute(filePath) ? filePath : require('path').resolve(config.WORKING_DIR, filePath);
+      
+      if (require('fs').existsSync(absPath) && !require('fs').statSync(absPath).isDirectory()) {
+        const content = require('fs').readFileSync(absPath, 'utf8');
+        const lineCount = content.split('\n').length;
+        
+        // Only upload if no line range is requested AND line count > threshold (150)
+        if (start_line == null && end_line == null && lineCount > 150) {
+          logger.info(`File ${filePath} has ${lineCount} lines (threshold is 150). Attempting direct upload...`);
+          try {
+            const res = await this.browser.uploadFile(absPath, tab);
+            if (res.uploaded) {
+              return `✓ File "${res.fileName}" (${lineCount} lines) was uploaded directly to DeepSeek chat context to avoid token bloat. Refer to it in your queries.`;
+            }
+          } catch (err) {
+            logger.warn(`Failed to upload ${filePath}: ${err.message}. Falling back to normal text paste.`);
+          }
+        }
+      }
+    }
+
     if (toolName !== 'run_command') {
       return await executeTool(toolName, args);
     }

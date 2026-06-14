@@ -846,6 +846,17 @@ const TOOLS = {
     },
   },
 
+  // ── Upload File ─────────────────────────────────────────────────────────────
+  upload_file: {
+    description: 'Upload a file directly to the DeepSeek chat context so the model can read it directly. Highly recommended for files over 150 lines.',
+    parameters: {
+      path: { type: 'string', required: true, description: 'Path to the file to upload' },
+    },
+    async execute({ path: filePath }) {
+      return `File upload requested for ${filePath}`;
+    }
+  },
+
 };
 
 // ─────────────────────────────────────────────

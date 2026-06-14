@@ -106,11 +106,16 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
     return res.status(400).json({ error: 'Prompt required' });
   }
 
-  if (!req.session.chatQueue) {
-    req.session.chatQueue = Promise.resolve();
+  if (!req.session.chatQueues) {
+    req.session.chatQueues = new Map();
   }
 
-  // Queue tasks sequentially per session to prevent bot-detection bans
+  const tabName = tab || 'default';
+  if (!req.session.chatQueues.has(tabName)) {
+    req.session.chatQueues.set(tabName, Promise.resolve());
+  }
+
+  // Queue tasks sequentially per tab to prevent bot-detection bans
   const executeChat = () => new Promise(async (resolve, reject) => {
     try {
       sessionLogger?.logOrchestration('CHAT_REQUEST', { tab, model, promptLen: (prompt || '').length });
@@ -129,7 +134,7 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
       res.json({ text: result, toolCalls: [] });
       resolve();
     } catch (err) {
-      logger.error(`Chat failed for session ${req.params.id}: ${err.message}`);
+      logger.error(`Chat failed for session ${req.params.id} (tab: ${tabName}): ${err.message}`);
       sessionLogger?.logError(`Chat failed: ${err.message}`, { tab, model });
       res.status(500).json({ error: err.message });
       reject(err);
@@ -137,9 +142,10 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
   });
 
   // Chain to the queue and ignore failures of previous runs
-  req.session.chatQueue = req.session.chatQueue
-    .then(executeChat)
-    .catch(() => executeChat());
+  req.session.chatQueues.set(
+    tabName,
+    req.session.chatQueues.get(tabName).then(executeChat).catch(() => executeChat())
+  );
 });
 
 // POST /session/:id/close — shut down and remove session

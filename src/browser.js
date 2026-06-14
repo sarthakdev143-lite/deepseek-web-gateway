@@ -100,6 +100,21 @@ class DeepSeekBrowser {
     return this.adaptiveSelectors.get(this.activeTab);
   }
 
+  _resolveTab(tabName) {
+    const tab = tabName || this.activeTab;
+    const page = this.pages.get(tab);
+    if (!page) {
+      throw new Error(`Tab "${tab}" not found/initialized.`);
+    }
+    let selector = this.adaptiveSelectors.get(tab);
+    if (!selector) {
+      const { AdaptiveSelector } = require('./adaptive-selectors');
+      selector = new AdaptiveSelector(page);
+      this.adaptiveSelectors.set(tab, selector);
+    }
+    return { page, adaptiveSelector: selector };
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async launch() {
@@ -243,8 +258,8 @@ class DeepSeekBrowser {
       // Attach crash recovery on new tab too
       this._attachCrashRecovery(tabName, newPage);
       // Navigate and start new chat
-      await this._navigate(config.DEEPSEEK_URL);
-      await this.newChat();
+      await this._navigate(config.DEEPSEEK_URL, tabName);
+      await this.newChat(tabName);
     } else {
       this.activeTab = tabName;
       const page = this.pages.get(tabName);
@@ -256,12 +271,13 @@ class DeepSeekBrowser {
     if (!modelName) return;
     logger.info(`Configuring model for tab ${tabName}: ${modelName}`);
     await this.switchTab(tabName);
+    const { page } = this._resolveTab(tabName);
     try {
       const isR1 = modelName.toUpperCase().includes('R1');
       const targetLabel = isR1 ? 'DeepSeek-R1' : 'DeepSeek-V3';
       
       // Look for the model selection dropdown button
-      const dropdown = await this.page.locator('div, button').filter({ hasText: /DeepSeek-V3|DeepSeek-R1/ }).first();
+      const dropdown = await page.locator('div, button').filter({ hasText: /DeepSeek-V3|DeepSeek-R1/ }).first();
       if (await dropdown.count() > 0) {
         const text = await dropdown.innerText();
         if (text.includes(targetLabel)) {
@@ -270,16 +286,16 @@ class DeepSeekBrowser {
         }
         
         await dropdown.click();
-        await this.page.waitForTimeout(600);
+        await page.waitForTimeout(600);
         
-        const option = await this.page.locator('div, li, span').filter({ hasText: new RegExp(targetLabel, 'i') }).first();
+        const option = await page.locator('div, li, span').filter({ hasText: new RegExp(targetLabel, 'i') }).first();
         if (await option.count() > 0) {
           await option.click();
-          await this.page.waitForTimeout(1000);
+          await page.waitForTimeout(1000);
           logger.success(`Switched model on tab ${tabName} to ${targetLabel}`);
         } else {
           logger.warn(`Could not find dropdown option for ${targetLabel}`);
-          await this.page.keyboard.press('Escape');
+          await page.keyboard.press('Escape');
         }
       } else {
         logger.warn('Could not locate model switcher dropdown on page');
@@ -291,22 +307,24 @@ class DeepSeekBrowser {
 
   // ── Navigation ─────────────────────────────────────────────────────────────
 
-  async _navigate(url) {
+  async _navigate(url, tabName) {
+    const { page } = this._resolveTab(tabName);
     try {
-      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      await this.page.waitForTimeout(1_500);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForTimeout(1_500);
     } catch (err) {
-      logger.warn(`Navigation warning: ${err.message}`);
+      logger.warn(`Navigation warning on tab ${tabName}: ${err.message}`);
     }
   }
 
-  async newChat() {
-    if (this.adaptiveSelector) {
-      const el = await this.adaptiveSelector.findElement('newChat');
+  async newChat(tabName) {
+    const { page, adaptiveSelector } = this._resolveTab(tabName);
+    if (adaptiveSelector) {
+      const el = await adaptiveSelector.findElement('newChat');
       if (el && await el.isVisible()) {
         await el.click();
-        await this.page.waitForTimeout(1_000);
-        logger.dim('Started new chat session via adaptive selector');
+        await page.waitForTimeout(1_000);
+        logger.dim(`Started new chat session via adaptive selector on tab ${tabName}`);
         return;
       }
     }
@@ -314,27 +332,28 @@ class DeepSeekBrowser {
     try {
       for (const sel of SEL.newChat) {
         try {
-          const el = await this.page.$(sel);
+          const el = await page.$(sel);
           if (el && await el.isVisible()) {
             await el.click();
-            await this.page.waitForTimeout(1_000);
-            logger.dim('Started new chat session');
+            await page.waitForTimeout(1_000);
+            logger.dim(`Started new chat session on tab ${tabName}`);
             return;
           }
         } catch { }
       }
     } catch { }
 
-    await this._navigate(config.DEEPSEEK_URL);
-    logger.dim('Navigated to DeepSeek home (new chat)');
+    await this._navigate(config.DEEPSEEK_URL, tabName);
+    logger.dim(`Navigated to DeepSeek home (new chat) on tab ${tabName}`);
   }
 
   // ── Login handling ─────────────────────────────────────────────────────────
 
-  async _ensureLoggedIn() {
-    await this.page.waitForTimeout(2_000);
+  async _ensureLoggedIn(tabName) {
+    const { page } = this._resolveTab(tabName);
+    await page.waitForTimeout(2_000);
 
-    const needsLogin = await this.page.evaluate(() => {
+    const needsLogin = await page.evaluate(() => {
       const url = window.location.href;
       const bodyText = document.body?.innerText || '';
       return (
@@ -350,7 +369,7 @@ class DeepSeekBrowser {
     if (needsLogin) {
       this._printLoginBanner();
       await this._waitForEnter();
-      await this.page.waitForTimeout(2_000);
+      await page.waitForTimeout(2_000);
     }
 
     return needsLogin;
@@ -392,19 +411,20 @@ class DeepSeekBrowser {
 
   // ── Sending Messages ───────────────────────────────────────────────────────
 
-  async sendMessage(text) {
-    const { el, isTextarea } = await this._findInput();
+  async sendMessage(text, tabName) {
+    const { page } = this._resolveTab(tabName);
+    const { el, isTextarea } = await this._findInput(tabName);
 
     await el.click({ force: true });
-    await this.page.waitForTimeout(200);
+    await page.waitForTimeout(200);
 
-    await this.page.keyboard.press('Control+a');
-    await this.page.waitForTimeout(100);
+    await page.keyboard.press('Control+a');
+    await page.waitForTimeout(100);
 
     if (isTextarea) {
       await el.fill(text);
     } else {
-      await this.page.evaluate((element, content) => {
+      await page.evaluate((element, content) => {
         element.focus();
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
@@ -413,19 +433,20 @@ class DeepSeekBrowser {
       }, el, text);
     }
 
-    await this.page.waitForTimeout(config.SEND_DELAY);
+    await page.waitForTimeout(config.SEND_DELAY);
 
-    const clicked = await this._clickSendButton();
+    const clicked = await this._clickSendButton(tabName);
     if (!clicked) {
-      await this.page.keyboard.press('Enter');
+      await page.keyboard.press('Enter');
     }
 
-    await this.page.waitForTimeout(500);
+    await page.waitForTimeout(500);
   }
 
-  async _findInput() {
-    if (this.adaptiveSelector) {
-      const el = await this.adaptiveSelector.findElement('chatInput');
+  async _findInput(tabName) {
+    const { page, adaptiveSelector } = this._resolveTab(tabName);
+    if (adaptiveSelector) {
+      const el = await adaptiveSelector.findElement('chatInput');
       if (el) {
         const tagName = await el.evaluate(e => e.tagName.toLowerCase());
         const isContentEditable = await el.evaluate(e => e.isContentEditable);
@@ -435,7 +456,7 @@ class DeepSeekBrowser {
 
     for (const sel of SEL.chatInput) {
       try {
-        const el = await this.page.waitForSelector(sel, { timeout: 4_000, state: 'visible' });
+        const el = await page.waitForSelector(sel, { timeout: 4_000, state: 'visible' });
         if (!el) continue;
         const tagName = await el.evaluate(e => e.tagName.toLowerCase());
         const isContentEditable = await el.evaluate(e => e.isContentEditable);
@@ -450,9 +471,10 @@ class DeepSeekBrowser {
     );
   }
 
-  async _clickSendButton() {
-    if (this.adaptiveSelector) {
-      const el = await this.adaptiveSelector.findElement('sendButton');
+  async _clickSendButton(tabName) {
+    const { page, adaptiveSelector } = this._resolveTab(tabName);
+    if (adaptiveSelector) {
+      const el = await adaptiveSelector.findElement('sendButton');
       if (el && await el.isVisible() && await el.isEnabled()) {
         await el.click();
         return true;
@@ -461,7 +483,7 @@ class DeepSeekBrowser {
 
     for (const sel of SEL.sendButton) {
       try {
-        const el = await this.page.$(sel);
+        const el = await page.$(sel);
         if (el && await el.isVisible() && await el.isEnabled()) {
           await el.click();
           return true;
@@ -477,10 +499,11 @@ class DeepSeekBrowser {
    * Clicks the DeepSeek "Continue" button if it is visible.
    * Returns true if the button was found and clicked.
    */
-  async _clickContinueIfPresent() {
+  async _clickContinueIfPresent(tabName) {
+    const { page } = this._resolveTab(tabName);
     try {
       // Strategy 1: scan all visible buttons for exact "Continue" text
-      const found = await this.page.evaluate(() => {
+      const found = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
         for (const btn of buttons) {
           const txt = (btn.innerText || btn.textContent || '').trim();
@@ -504,7 +527,7 @@ class DeepSeekBrowser {
         '[class*="continueBtn"]',
       ]) {
         try {
-          const el = await this.page.$(sel);
+          const el = await page.$(sel);
           if (el && await el.isVisible()) {
             await el.click();
             return true;
@@ -521,26 +544,20 @@ class DeepSeekBrowser {
    * Wait for the DeepSeek model to finish responding.
    * Handles mid-response "Continue" buttons transparently by clicking them
    * and accumulating all chunks into a single seamless string.
-   *
-   * KEY FIX: After a Continue click, DeepSeek may either:
-   *   (a) Append new text to the same DOM message element, OR
-   *   (b) Render only the newly generated segment
-   * We handle both by snapshotting the cleaned text length BEFORE clicking
-   * Continue, then diffing AFTER the next chunk settles. This is DOM-render
-   * agnostic and correctly accumulates across unlimited continuations.
    */
-  async waitForResponse() {
+  async waitForResponse(tabName) {
+    const { page } = this._resolveTab(tabName);
     const timeout    = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
     const start      = Date.now();
 
     // ── Wait for the first new assistant message to appear ────────────────
-    const initialCount = await this._getMessageCount();
+    const initialCount = await this._getMessageCount(tabName);
     let appeared = false;
     while (Date.now() - start < 15_000) {
-      const count = await this._getMessageCount();
+      const count = await this._getMessageCount(tabName);
       if (count > initialCount) { appeared = true; break; }
-      await this.page.waitForTimeout(400);
+      await page.waitForTimeout(400);
     }
     if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
 
@@ -555,7 +572,7 @@ class DeepSeekBrowser {
       let dotCount   = 0;
 
       while (Date.now() - start < timeout) {
-        const text = await this._extractLastMessage();
+        const text = await this._extractLastMessage(tabName);
 
         if (text !== lastText) {
           lastText    = text;
@@ -564,7 +581,7 @@ class DeepSeekBrowser {
           if (!stableStart) {
             stableStart = Date.now();
           } else if (Date.now() - stableStart >= stableDelay) {
-            if (!await this._isGenerating()) break; // generation truly stopped
+            if (!await this._isGenerating(tabName)) break; // generation truly stopped
             stableStart = null; // still streaming — reset stability timer
           }
         }
@@ -572,17 +589,17 @@ class DeepSeekBrowser {
         dotCount = (dotCount + 1) % 4;
         const totalKB = (accumulatedText.length / 1024).toFixed(1);
         logger.thinking(
-          `Receiving response${'.'.repeat(dotCount)}  (${text.length} chars this segment` +
+          `Receiving response [Tab: ${tabName || 'default'}]${'.'.repeat(dotCount)}  (${text.length} chars this segment` +
           (continueRound > 0 ? `, ${totalKB} KB total across ${continueRound + 1} parts` : '') + ')'
         );
-        await this.page.waitForTimeout(500);
+        await page.waitForTimeout(500);
       }
       logger.clearLine();
 
       // ── Snapshot the DOM text length BEFORE clicking Continue ────────────
       // This is the anchor we diff against after the next chunk settles,
       // regardless of whether DeepSeek appends in-place or re-renders.
-      const domTextAfterSettle = this._cleanText(await this._extractLastMessage());
+      const domTextAfterSettle = this._cleanText(await this._extractLastMessage(tabName));
       const anchorLength       = accumulatedText.length; // chars accumulated so far
 
       if (continueRound === 0) {
@@ -596,20 +613,18 @@ class DeepSeekBrowser {
           accumulatedText += newFromDom;
           logger.info(`Appended ${newFromDom.length} chars from continue-round ${continueRound} (total: ${(accumulatedText.length / 1024).toFixed(1)} KB)`);
         }
-        // Note: even if newFromDom is empty here, we still check for a Continue
-        // button — DeepSeek sometimes shows it before the new text renders.
       }
 
       // ── Let the UI fully settle, then look for Continue button ──────────
-      await this.page.waitForTimeout(1_000);
-      const clicked = await this._clickContinueIfPresent();
+      await page.waitForTimeout(1_000);
+      const clicked = await this._clickContinueIfPresent(tabName);
       if (!clicked) break; // no Continue button — response is complete
 
       continueRound++;
       logger.info(`⏩ Clicked "Continue" (part ${continueRound + 1}) — waiting for next segment...`);
 
       // Wait for the new segment to start streaming before re-entering the loop
-      await this.page.waitForTimeout(2_000);
+      await page.waitForTimeout(2_000);
 
       // Safety: bail if we've been running longer than the total timeout
       if (Date.now() - start >= timeout) {
@@ -620,7 +635,7 @@ class DeepSeekBrowser {
 
     if (continueRound > 0) {
       const kb = (accumulatedText.length / 1024).toFixed(1);
-      logger.success(`✅ Response fully assembled: ${continueRound + 1} segment(s), ${kb} KB total`);
+      logger.success(`✅ Response fully assembled [Tab: ${tabName || 'default'}]: ${continueRound + 1} segment(s), ${kb} KB total`);
     }
 
     return accumulatedText;
@@ -628,8 +643,9 @@ class DeepSeekBrowser {
 
   // ── DOM Extraction ─────────────────────────────────────────────────────────
 
-  async _getMessageCount() {
-    return await this.page.evaluate(() => {
+  async _getMessageCount(tabName) {
+    const { page } = this._resolveTab(tabName);
+    return await page.evaluate(() => {
       const candidates = [
         '[class*="assistant"][class*="message"]',
         '[data-role="assistant"]',
@@ -646,8 +662,9 @@ class DeepSeekBrowser {
     });
   }
 
-  async _extractLastMessage() {
-    return await this.page.evaluate(() => {
+  async _extractLastMessage(tabName) {
+    const { page } = this._resolveTab(tabName);
+    return await page.evaluate(() => {
       function getFullText(el) {
         if (!el) return '';
         let result = '';
@@ -741,9 +758,10 @@ class DeepSeekBrowser {
     });
   }
 
-  async _isGenerating() {
-    if (this.adaptiveSelector) {
-      const el = await this.adaptiveSelector.trySelector(SEL.stopButton[0]);
+  async _isGenerating(tabName) {
+    const { page, adaptiveSelector } = this._resolveTab(tabName);
+    if (adaptiveSelector) {
+      const el = await adaptiveSelector.trySelector(SEL.stopButton[0]);
       if (el) return true;
     }
 
@@ -835,11 +853,71 @@ class DeepSeekBrowser {
     console.log('═'.repeat(60) + '\n');
   }
 
-  async screenshot(filePath) {
+  async screenshot(filePath, tabName) {
+    const { page } = this._resolveTab(tabName);
     const defaultPath = path.join(config.SESSION_DIR, 'debug-screenshot.png');
     const finalPath = filePath || defaultPath;
-    await this.page.screenshot({ path: finalPath, fullPage: false });
+    await page.screenshot({ path: finalPath, fullPage: false });
     logger.info(`Screenshot saved: ${finalPath}`);
+  }
+
+  async uploadFile(filePath, tabName) {
+    const { page } = this._resolveTab(tabName);
+    const path = require('path');
+    
+    const uploadSelectors = [
+      'input[type="file"]',
+      'button[aria-label*="attach" i]',
+      'button[aria-label*="upload" i]',
+      '[class*="upload"]',
+      '[class*="attach"]',
+    ];
+    
+    logger.info(`[Tab: ${tabName || 'default'}] Attempting file upload: ${filePath}`);
+    
+    try {
+      const fileInput = await page.$('input[type="file"]');
+      if (fileInput) {
+        await fileInput.setInputFiles(filePath);
+        await page.waitForTimeout(2000);
+        logger.success(`[Tab: ${tabName || 'default'}] Successfully uploaded ${path.basename(filePath)} via input[type="file"]`);
+        return { uploaded: true, fileName: path.basename(filePath) };
+      }
+    } catch (err) {
+      logger.warn(`Direct file input upload failed: ${err.message}. Trying button fallback...`);
+    }
+    
+    for (const sel of uploadSelectors.slice(1)) {
+      try {
+        const btn = await page.$(sel);
+        if (btn && await btn.isVisible()) {
+          const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 5000 });
+          await btn.click();
+          const fileChooser = await fileChooserPromise;
+          await fileChooser.setFiles(filePath);
+          await page.waitForTimeout(2000);
+          logger.success(`[Tab: ${tabName || 'default'}] Successfully uploaded ${path.basename(filePath)} via button ${sel}`);
+          return { uploaded: true, fileName: path.basename(filePath) };
+        }
+      } catch (err) {
+        // ignore and try next selector fallback
+      }
+    }
+
+    // ─── HARD WARNING ───────────────────────────────────────────────────────────
+    // Every upload strategy exhausted. Do NOT silently fall back to text-paste.
+    // Surface this loudly so the caller can inform the user.
+    const hardMsg =
+      `[HARD WARNING] File upload FAILED for: ${filePath}\n` +
+      `  All ${uploadSelectors.length} upload selectors were tried and none succeeded.\n` +
+      `  The file was NOT pasted as text. The agent cannot proceed with this file silently.\n` +
+      `  Action required: check DeepSeek UI for changes, or verify the file path.`;
+    logger.error(hardMsg);
+    // Print directly to stderr so it is never swallowed by a log level filter
+    process.stderr.write('\n' + '═'.repeat(70) + '\n');
+    process.stderr.write(hardMsg + '\n');
+    process.stderr.write('═'.repeat(70) + '\n\n');
+    throw new Error(hardMsg);
   }
 }
 
