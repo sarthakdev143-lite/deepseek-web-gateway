@@ -12,7 +12,7 @@ const config = require('./config');
 // ── Read-only mode guard ───────────────────────────────────────────
 let _readOnly = false;
 const MUTATION_TOOLS = new Set([
-  'write_file', 'replace_in_file', 'append_to_file', 'delete_file',
+  'write_file', 'write_files', 'replace_in_file', 'append_to_file', 'delete_file',
   'move_file', 'copy_file', 'run_command', 'start_server',
 ]);
 
@@ -124,6 +124,21 @@ async function atomicWriteFile(filePath, content) {
 //  Tool definitions
 // ─────────────────────────────────────────────
 
+// Helper: format symbol entries for get_symbol_signatures
+function _formatSymbols(filePath, entry) {
+  if (!entry || !entry.symbols || entry.symbols.length === 0) {
+    return `[${filePath}]\nNo symbols found in index.`;
+  }
+  const lines = [`[${filePath}]`, `Imports: ${(entry.imports || []).join(', ') || '(none)'}`, ''];
+  const exportedNames = new Set(entry.exports || []);
+  for (const sym of entry.symbols) {
+    const tag = sym.exported || exportedNames.has(sym.name) ? '(exported)' : '(private)';
+    const sig = sym.signature && sym.signature !== sym.name ? sym.signature : sym.name;
+    lines.push(`  ${sym.kind || 'symbol'} ${tag}  L${sym.line || '?'}\n    ${sig}`);
+  }
+  return lines.join('\n');
+}
+
 const TOOLS = {
 
   // ── Read File ───────────────────────────────────────────────────────────────
@@ -192,6 +207,58 @@ const TOOLS = {
       await logChange('write', filePath, `wrote ${lineCount} lines`);
       return `✓ Wrote ${formatBytes(Buffer.byteLength(content, 'utf8'))} (${lineCount} lines) → ${filePath}`;
     },
+  },
+
+  // ── Write Files (Batch) ──────────────────────────────────────────────────────
+  write_files: {
+    description: 'Write (create or fully overwrite) multiple files to disk simultaneously.',
+    parameters: {
+      files: { type: 'array', required: true, description: 'An array of objects: [ { path: string, content: string }, ... ]' }
+    },
+    async execute({ files }) {
+      if (!Array.isArray(files)) {
+        return 'Error: files parameter must be an array';
+      }
+
+      const results = [];
+      for (const file of files) {
+        const filePath = file.path;
+        const content = file.content;
+        if (!filePath || content === undefined) {
+          results.push(`✗ Error: file object missing path or content`);
+          continue;
+        }
+
+        try {
+          const absPath = resolve(filePath);
+          await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
+
+          // Idempotency: skip write if file content is already identical
+          let matches = false;
+          if (fs.existsSync(absPath)) {
+            try {
+              const existing = await fs.promises.readFile(absPath, 'utf8');
+              const hashNew = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+              const hashOld = crypto.createHash('sha256').update(existing, 'utf8').digest('hex');
+              matches = hashNew === hashOld;
+            } catch {}
+          }
+
+          if (matches) {
+            results.push(`✓ ${filePath}: No-op — file content unchanged (${formatBytes(Buffer.byteLength(content, 'utf8'))})`);
+            continue;
+          }
+
+          await atomicWriteFile(absPath, content);
+          const lineCount = content.split('\n').length;
+          await logChange('write_file', filePath, `Batch wrote ${lineCount} lines`);
+          results.push(`✓ ${filePath}: Written successfully (${formatBytes(Buffer.byteLength(content, 'utf8'))}, ${lineCount} lines)`);
+        } catch (err) {
+          results.push(`✗ ${filePath}: Error writing file: ${err.message}`);
+        }
+      }
+      return results.join('\n');
+    }
   },
 
   // ── Append to File ──────────────────────────────────────────────────────────
@@ -731,6 +798,50 @@ const TOOLS = {
         return JSON.stringify(log.slice(-50), null, 2);
       } catch (e) {
         return `Error reading change log: ${e.message}`;
+      }
+    },
+  },
+
+  // ── Symbol Signatures ────────────────────────────────────────────────────────
+  get_symbol_signatures: {
+    description: [
+      'Returns the list of exported and declared symbols (functions, classes, methods) for a given file,',
+      'including their signatures (parameters). Use this INSTEAD of reading the full file when you only',
+      'need to understand the API surface — it avoids bloating the context with implementation details.',
+    ].join(' '),
+    parameters: {
+      path: { type: 'string', required: true, description: 'Relative or absolute path to the source file' },
+    },
+    async execute({ path: filePath }) {
+      try {
+        // The index is written relative to the working directory
+        const indexFile = path.join(config.WORKING_DIR, '.seekcode', 'index.json');
+        if (!fs.existsSync(indexFile)) {
+          return `⚠ Symbol index not found at ${indexFile}. The project may not have been analyzed yet.`;
+        }
+        const index = JSON.parse(await fs.promises.readFile(indexFile, 'utf8'));
+
+        // Normalise the requested path to a project-relative key
+        const abs = path.isAbsolute(filePath) ? filePath : path.resolve(config.WORKING_DIR, filePath);
+        const rel = path.relative(config.WORKING_DIR, abs).replace(/\\/g, '/');
+
+        const entry = index.files?.[rel];
+        if (!entry) {
+          // Try fuzzy match — useful when the user passes a basename
+          const candidates = Object.keys(index.files || {}).filter(k => k.endsWith(rel) || k.includes(rel));
+          if (candidates.length === 1) {
+            const candidate = index.files[candidates[0]];
+            return _formatSymbols(candidates[0], candidate);
+          }
+          if (candidates.length > 1) {
+            return `Multiple files match "${rel}":\n${candidates.join('\n')}\nPlease provide a more specific path.`;
+          }
+          return `⚠ File "${rel}" not found in symbol index. Available files: ${Object.keys(index.files || {}).slice(0, 20).join(', ')}`;
+        }
+
+        return _formatSymbols(rel, entry);
+      } catch (e) {
+        return `Error reading symbol index: ${e.message}`;
       }
     },
   },

@@ -87,6 +87,7 @@ function buildSystemPrompt() {
     '- After writing code, run it (if applicable) to verify it works.',
     '- Prefer small focused files over large monolithic ones.',
     '- When installing packages, check package.json first.',
+    '- When writing or modifying multiple files, prefer using the write_files tool to perform all writes in a single turn.',
     '',
     'MULTI-STEP APPROACH',
     '───────────────────',
