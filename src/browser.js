@@ -276,6 +276,99 @@ class DeepSeekBrowser {
       const isR1 = modelName.toUpperCase().includes('R1');
       const targetLabel = isR1 ? 'DeepSeek-R1' : 'DeepSeek-V3';
       
+      // ── New Tab/Toggle UI check (Instant/Expert & DeepThink) ────────────────
+      const hasTabs = await page.evaluate(() => {
+        return !!Array.from(document.querySelectorAll('button, div, span')).find(e => 
+          e.textContent?.trim() === 'Expert' || e.textContent?.trim() === 'Instant'
+        );
+      });
+      
+      if (hasTabs) {
+        logger.dim(`Detected Tab/Toggle model selection UI on tab ${tabName}`);
+        
+        // 1. Resolve current active mode (Instant vs Expert)
+        const currentMode = await page.evaluate(() => {
+          const text = document.body.innerText || '';
+          if (text.includes('Start chatting with Expert')) return 'Expert';
+          if (text.includes('Start chatting with Instant')) return 'Instant';
+          if (text.includes('Start chatting with Vision')) return 'Vision';
+          
+          // Fallback: search classes
+          const buttons = Array.from(document.querySelectorAll('button, div, span'));
+          for (const name of ['Instant', 'Expert', 'Vision']) {
+            const btn = buttons.find(e => e.textContent?.trim() === name || e.innerText?.trim() === name);
+            if (btn) {
+              const pill = btn.closest('button') || btn.closest('[role="button"]') || btn;
+              if (pill.getAttribute('aria-checked') === 'true' || 
+                  pill.getAttribute('aria-selected') === 'true' ||
+                  pill.classList.contains('active') ||
+                  pill.classList.contains('selected')) {
+                return name;
+              }
+            }
+          }
+          return null;
+        });
+        
+        const targetMode = isR1 ? 'Expert' : 'Instant';
+        if (currentMode && currentMode !== targetMode) {
+          logger.info(`Switching mode from ${currentMode} to ${targetMode}`);
+          const modeBtn = page.locator('button, div, span').filter({ hasText: new RegExp(`^${targetMode}$`, 'i') }).first();
+          if (await modeBtn.count() > 0) {
+            await modeBtn.click();
+            await page.waitForTimeout(1000);
+          }
+        }
+        
+        // 2. Resolve DeepThink toggle
+        const checkDeepThinkActive = async () => {
+          return await page.evaluate(() => {
+            const el = Array.from(document.querySelectorAll('button, div, span')).find(e => 
+              e.textContent?.trim() === 'DeepThink' || e.innerText?.trim() === 'DeepThink'
+            );
+            if (!el) return false;
+            
+            const btn = el.closest('button') || el.closest('[role="button"]') || el;
+            const style = window.getComputedStyle(btn);
+            const bg = style.backgroundColor || '';
+            const isBlue = bg.includes('rgb(') && (() => {
+              const match = bg.match(/\d+/g);
+              if (match && match.length >= 3) {
+                const r = parseInt(match[0]);
+                const g = parseInt(match[1]);
+                const b = parseInt(match[2]);
+                return b > r && b > 100;
+              }
+              return false;
+            })();
+            
+            const hasCheckedAttr = btn.getAttribute('aria-checked') === 'true' || 
+                                   btn.getAttribute('aria-selected') === 'true' ||
+                                   btn.classList.contains('active') ||
+                                   btn.classList.contains('checked') ||
+                                   btn.classList.contains('selected');
+                                    
+            return isBlue || hasCheckedAttr;
+          });
+        };
+        
+        const deepThinkActive = await checkDeepThinkActive();
+        const shouldBeActive = isR1; // DeepThink is R1
+        
+        if (deepThinkActive !== shouldBeActive) {
+          logger.info(`Toggling DeepThink to ${shouldBeActive ? 'ON' : 'OFF'}`);
+          const deepThinkBtn = page.locator('button, div, span').filter({ hasText: /^DeepThink$/ }).first();
+          if (await deepThinkBtn.count() > 0) {
+            await deepThinkBtn.click();
+            await page.waitForTimeout(1000);
+          }
+        }
+        
+        logger.success(`Switched model on tab ${tabName} to ${targetLabel} (${targetMode} mode, DeepThink: ${shouldBeActive ? 'ON' : 'OFF'})`);
+        return;
+      }
+      
+      // ── Dropdown UI Fallback ────────────────────────────────────────────────
       // Look for the model selection dropdown button
       const dropdown = await page.locator('div, button').filter({ hasText: /DeepSeek-V3|DeepSeek-R1/ }).first();
       if (await dropdown.count() > 0) {
@@ -292,13 +385,13 @@ class DeepSeekBrowser {
         if (await option.count() > 0) {
           await option.click();
           await page.waitForTimeout(1000);
-          logger.success(`Switched model on tab ${tabName} to ${targetLabel}`);
+          logger.success(`Switched model on tab ${tabName} to ${targetLabel} via dropdown`);
         } else {
           logger.warn(`Could not find dropdown option for ${targetLabel}`);
           await page.keyboard.press('Escape');
         }
       } else {
-        logger.warn('Could not locate model switcher dropdown on page');
+        logger.warn('Could not locate model switcher dropdown or tabs on page');
       }
     } catch (err) {
       logger.warn(`Failed to switch model: ${err.message}`);
@@ -318,6 +411,8 @@ class DeepSeekBrowser {
   }
 
   async newChat(tabName) {
+    // Normalise: if caller passed nothing, resolve against the active tab
+    tabName = tabName || this.activeTab || 'default';
     const { page, adaptiveSelector } = this._resolveTab(tabName);
     if (adaptiveSelector) {
       const el = await adaptiveSelector.findElement('newChat');
@@ -865,6 +960,25 @@ class DeepSeekBrowser {
     const { page } = this._resolveTab(tabName);
     const path = require('path');
     
+    // ── Check if the page supports file uploads first ───────────────────────
+    const hasUploadCapability = await page.evaluate(() => {
+      const hasInput = !!document.querySelector('input[type="file"]');
+      const buttons = Array.from(document.querySelectorAll('button, div, span'));
+      const hasBtn = buttons.some(btn => {
+        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const cls = (btn.className || '').toLowerCase();
+        const txt = (btn.textContent || btn.innerText || '').toLowerCase();
+        return label.includes('attach') || label.includes('upload') || 
+               cls.includes('upload') || cls.includes('attach') ||
+               txt.includes('attach') || txt.includes('upload');
+      });
+      return hasInput || hasBtn;
+    });
+    
+    if (!hasUploadCapability) {
+      throw new Error(`File upload is not supported in this DeepSeek mode/UI layout. Please read the file content using read_file instead.`);
+    }
+
     const uploadSelectors = [
       'input[type="file"]',
       'button[aria-label*="attach" i]',
