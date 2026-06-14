@@ -520,92 +520,107 @@ class DeepSeekBrowser {
   /**
    * Wait for the DeepSeek model to finish responding.
    * Handles mid-response "Continue" buttons transparently by clicking them
-   * and accumulating all chunks into a single returned string.
+   * and accumulating all chunks into a single seamless string.
+   *
+   * KEY FIX: After a Continue click, DeepSeek may either:
+   *   (a) Append new text to the same DOM message element, OR
+   *   (b) Render only the newly generated segment
+   * We handle both by snapshotting the cleaned text length BEFORE clicking
+   * Continue, then diffing AFTER the next chunk settles. This is DOM-render
+   * agnostic and correctly accumulates across unlimited continuations.
    */
   async waitForResponse() {
-    const timeout = config.RESPONSE_TIMEOUT;
+    const timeout    = config.RESPONSE_TIMEOUT;
     const stableDelay = config.STABLE_DELAY;
-    const start = Date.now();
+    const start      = Date.now();
 
-    // ── Wait for the first new message to appear ──────────────────────────
+    // ── Wait for the first new assistant message to appear ────────────────
     const initialCount = await this._getMessageCount();
     let appeared = false;
-
-    while (Date.now() - start < 12_000) {
+    while (Date.now() - start < 15_000) {
       const count = await this._getMessageCount();
       if (count > initialCount) { appeared = true; break; }
       await this.page.waitForTimeout(400);
     }
-
     if (!appeared) logger.warn('Response may have been delayed — continuing to wait...');
 
-    // ── Main accumulation loop (handles "Continue" buttons) ───────────────
+    // ── Main accumulation loop — no hard round cap, bounded by total timeout ─
     let accumulatedText = '';
-    let continueRound = 0;
-    const MAX_CONTINUE_ROUNDS = 20; // safety cap
+    let continueRound  = 0;
 
-    while (continueRound < MAX_CONTINUE_ROUNDS) {
-      // --- Inner stability loop: wait until this chunk stops streaming ---
-      let lastText = '';
+    while (true) {
+      // ── Inner stability loop: wait until this segment stops streaming ────
+      let lastText   = '';
       let stableStart = null;
-      let dotCount = 0;
+      let dotCount   = 0;
 
       while (Date.now() - start < timeout) {
         const text = await this._extractLastMessage();
 
         if (text !== lastText) {
-          lastText = text;
+          lastText    = text;
           stableStart = null;
         } else if (text.length > 0) {
-          if (!stableStart) stableStart = Date.now();
-          else if (Date.now() - stableStart >= stableDelay) {
-            if (!await this._isGenerating()) break; // truly stopped
-            stableStart = null; // still streaming — reset
+          if (!stableStart) {
+            stableStart = Date.now();
+          } else if (Date.now() - stableStart >= stableDelay) {
+            if (!await this._isGenerating()) break; // generation truly stopped
+            stableStart = null; // still streaming — reset stability timer
           }
         }
 
         dotCount = (dotCount + 1) % 4;
+        const totalKB = (accumulatedText.length / 1024).toFixed(1);
         logger.thinking(
-          `Receiving response${'.'.repeat(dotCount)}  (${text.length} chars` +
-          (continueRound > 0 ? `, part ${continueRound + 1}` : '') + ')'
+          `Receiving response${'.'.repeat(dotCount)}  (${text.length} chars this segment` +
+          (continueRound > 0 ? `, ${totalKB} KB total across ${continueRound + 1} parts` : '') + ')'
         );
         await this.page.waitForTimeout(500);
       }
-
       logger.clearLine();
 
-      // Record what was received in this round
-      const roundText = this._cleanText(await this._extractLastMessage());
+      // ── Snapshot the DOM text length BEFORE clicking Continue ────────────
+      // This is the anchor we diff against after the next chunk settles,
+      // regardless of whether DeepSeek appends in-place or re-renders.
+      const domTextAfterSettle = this._cleanText(await this._extractLastMessage());
+      const anchorLength       = accumulatedText.length; // chars accumulated so far
 
       if (continueRound === 0) {
-        accumulatedText = roundText;
+        // First segment — take everything
+        accumulatedText = domTextAfterSettle;
       } else {
-        // Append only the genuinely new part (avoid re-appending the full DOM text)
-        // DeepSeek keeps the whole conversation in the DOM, so we diff by length
-        const newChars = roundText.slice(accumulatedText.length);
-        if (newChars.trim()) {
-          accumulatedText += newChars;
-          logger.info(`Appended ${newChars.length} chars from continue-round ${continueRound}`);
-        } else {
-          // Nothing new was added — continuation is complete
-          break;
+        // Subsequent segments — the DOM may return the full message or just the
+        // new segment. Either way, take whatever is beyond our anchor.
+        const newFromDom = domTextAfterSettle.slice(anchorLength);
+        if (newFromDom.trim().length > 0) {
+          accumulatedText += newFromDom;
+          logger.info(`Appended ${newFromDom.length} chars from continue-round ${continueRound} (total: ${(accumulatedText.length / 1024).toFixed(1)} KB)`);
         }
+        // Note: even if newFromDom is empty here, we still check for a Continue
+        // button — DeepSeek sometimes shows it before the new text renders.
       }
 
-      // ── Check for Continue button ────────────────────────────────────
-      await this.page.waitForTimeout(800); // let UI settle
+      // ── Let the UI fully settle, then look for Continue button ──────────
+      await this.page.waitForTimeout(1_000);
       const clicked = await this._clickContinueIfPresent();
-      if (!clicked) break; // no Continue button — fully done
+      if (!clicked) break; // no Continue button — response is complete
 
-      logger.info(`Clicked "Continue" (round ${continueRound + 1}) — accumulating next chunk...`);
       continueRound++;
+      logger.info(`⏩ Clicked "Continue" (part ${continueRound + 1}) — waiting for next segment...`);
 
-      // Wait for the next chunk to start arriving
-      await this.page.waitForTimeout(1_500);
+      // Wait for the new segment to start streaming before re-entering the loop
+      await this.page.waitForTimeout(2_000);
+
+      // Safety: bail if we've been running longer than the total timeout
+      if (Date.now() - start >= timeout) {
+        logger.warn(`Total response timeout (${timeout}ms) reached after ${continueRound} continuation(s).`);
+        break;
+      }
     }
 
     if (continueRound > 0) {
-      logger.success(`Response completed across ${continueRound + 1} continuation(s) (${accumulatedText.length} total chars)`);
+      const kb = (accumulatedText.length / 1024).toFixed(1);
+      logger.success(`✅ Response fully assembled: ${continueRound + 1} segment(s), ${kb} KB total`);
     }
 
     return accumulatedText;

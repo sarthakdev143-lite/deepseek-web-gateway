@@ -12,8 +12,9 @@ const defaults = {
   SESSION_DIR    : path.join(os.homedir(), '.deepseek-agent', 'session'),
   HEADLESS       : false,
 
-  // Timing
-  RESPONSE_TIMEOUT : 180_000,
+  // Timing — DeepSeek web has NO output token limits via the Continue button.
+  // A deep R1 reasoning response can take 10-20+ minutes. We accommodate that.
+  RESPONSE_TIMEOUT : 30 * 60 * 1000, // 30 minutes total per response
   STABLE_DELAY     : 2_500,
   SEND_DELAY       : 400,
 
@@ -21,8 +22,8 @@ const defaults = {
   MAX_ITERATIONS   : 999,
   WORKING_DIR      : process.cwd(),
 
-  // Output
-  MAX_OUTPUT_LENGTH : 8_000,
+  // Output — raised to handle 100K+ token responses (unlimited Continue clicks)
+  MAX_OUTPUT_LENGTH : 200_000,
   DEBUG             : false,
 };
 
