@@ -198,16 +198,22 @@ class DeepSeekAgent {
 
         const readCalls   = calls.filter(c =>  READ_ONLY_TOOLS.has(c.name));
         const mutateCalls = calls.filter(c => !READ_ONLY_TOOLS.has(c.name));
+        // read_file may upload via the browser — run those sequentially to avoid races
+        const parallelReadCalls  = readCalls.filter(c => c.name !== 'read_file');
+        const sequentialReadCalls = readCalls.filter(c => c.name === 'read_file');
 
         // Results array aligned with original call order
         const results = new Array(calls.length);
 
-        // 1. Execute read-only tools in parallel
-        await Promise.all(readCalls.map(async call => {
+        const runReadOnlyCall = async (call, mode) => {
           const idx = calls.indexOf(call);
           const tStart = Date.now();
-          logger.toolCall(`[parallel] ${call.name}`, call.args);
-          slog?.logToolCall(call.name, call.args, { tab, iteration: iter, parallel: true });
+          logger.toolCall(`[${mode}] ${call.name}`, call.args);
+          slog?.logToolCall(call.name, call.args, {
+            tab,
+            iteration: iter,
+            parallel: mode === 'parallel',
+          });
           try {
             const result = await this._executeToolSafely(call.name, call.args);
             slog?.logToolResult(call.name, result, { isError: false, durationMs: Date.now() - tStart, iteration: iter });
@@ -216,9 +222,17 @@ class DeepSeekAgent {
             slog?.logToolResult(call.name, err.message, { isError: true, durationMs: Date.now() - tStart, iteration: iter });
             results[idx] = { call, result: `Error: ${err.message}`, isError: true };
           }
-        }));
+        };
 
-        // 2. Execute mutation tools sequentially (order matters)
+        // 1. Execute safe read-only tools in parallel
+        await Promise.all(parallelReadCalls.map(call => runReadOnlyCall(call, 'parallel')));
+
+        // 2. Execute read_file sequentially (browser upload is not re-entrant)
+        for (const call of sequentialReadCalls) {
+          await runReadOnlyCall(call, 'sequential');
+        }
+
+        // 3. Execute mutation tools sequentially (order matters)
         for (const call of mutateCalls) {
           const idx = calls.indexOf(call);
           const tStart = Date.now();
@@ -234,13 +248,13 @@ class DeepSeekAgent {
           }
         }
 
-        // 3. Send all results back in one message
+        // 4. Send all results back in one message
         const combined = results
           .filter(Boolean)
           .map(({ call, result, isError }) => formatToolResult(call.name, result, isError))
           .join('\n\n');
 
-        const feedbackMsg = conversation.addToolResult('BATCH_RESULTS', combined, false);
+        const feedbackMsg = conversation.addBatchToolResults(combined);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'parallel_batch_result' });
         await this.browser.sendMessage(feedbackMsg, tab);
         continue;
@@ -431,16 +445,17 @@ class DeepSeekAgent {
         const content = require('fs').readFileSync(absPath, 'utf8');
         const lineCount = content.split('\n').length;
         
-        // Only upload if no line range is requested AND line count > threshold (150)
-        if (start_line == null && end_line == null && lineCount > 150) {
-          logger.info(`File ${filePath} has ${lineCount} lines (threshold is 150). Attempting direct upload...`);
+        // Prefer browser upload for full-file reads so content stays as attachments,
+        // not pasted inline (especially important for multi-file batches).
+        if (start_line == null && end_line == null) {
+          logger.info(`File ${filePath} has ${lineCount} lines. Attempting direct upload...`);
           try {
             const res = await this.browser.uploadFile(absPath, tab);
             if (res.uploaded) {
-              return `✓ File "${res.fileName}" (${lineCount} lines) was uploaded directly to DeepSeek chat context to avoid token bloat. Refer to it in your queries.`;
+              return `✓ File "${res.fileName}" (${lineCount} lines) was uploaded directly to DeepSeek chat context. Refer to it in your queries — do not re-request this file.`;
             }
           } catch (err) {
-            logger.warn(`Failed to upload ${filePath}: ${err.message}. Falling back to normal text paste.`);
+            logger.warn(`Failed to upload ${filePath}: ${err.message}. Falling back to inline text.`);
           }
         }
       }

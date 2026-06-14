@@ -163,6 +163,21 @@ class ConversationManager {
   }
 
   /**
+   * Feed back multiple tool results in one user turn.
+   * `formattedBlocks` must already include per-tool [TOOL RESULT] / [END TOOL RESULT] markers.
+   */
+  addBatchToolResults(formattedBlocks) {
+    const content = [
+      String(formattedBlocks),
+      '',
+      'Continue executing the current step. Call another tool or, if the current step is fully complete and verified, provide your final response.',
+    ].join('\n');
+
+    this.messages.push({ role: 'user', content });
+    return content;
+  }
+
+  /**
    * Add an assistant message (the AI's raw response).
    */
   addAssistantMessage(content) {

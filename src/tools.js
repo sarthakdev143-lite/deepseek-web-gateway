@@ -848,7 +848,7 @@ const TOOLS = {
 
   // ── Upload File ─────────────────────────────────────────────────────────────
   upload_file: {
-    description: 'Upload a file directly to the DeepSeek chat context so the model can read it directly. Highly recommended for files over 150 lines.',
+    description: 'Upload a file directly to the DeepSeek chat context so the model can read it directly. read_file already does this automatically when possible.',
     parameters: {
       path: { type: 'string', required: true, description: 'Path to the file to upload' },
     },
@@ -900,4 +900,4 @@ async function executeTool(name, args) {
   return await tool.execute(args);
 }
 
-module.exports = { TOOLS, executeTool, getToolDescriptions, stopAllServers, setReadOnly, isReadOnly };
+module.exports = { TOOLS, executeTool, getToolDescriptions, stopAllServers, setReadOnly, isReadOnly };

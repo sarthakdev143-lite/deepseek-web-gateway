@@ -310,24 +310,28 @@ class DeepSeekBrowser {
           return null;
         });
         
-        const targetMode = isR1 ? 'Expert' : 'Instant';
-        if (currentMode && currentMode !== targetMode) {
-          logger.info(`Switching mode from ${currentMode} to ${targetMode}`);
+        // Always use Instant — Expert mode does not expose file upload controls.
+        const targetMode = 'Instant';
+        if (currentMode !== targetMode) {
+          logger.info(`Switching mode from ${currentMode || 'unknown'} to ${targetMode}`);
           const modeBtn = page.locator('button, div, span').filter({ hasText: new RegExp(`^${targetMode}$`, 'i') }).first();
           if (await modeBtn.count() > 0) {
             await modeBtn.click();
             await page.waitForTimeout(1000);
           }
         }
-        
-        // 2. Resolve DeepThink toggle
-        const checkDeepThinkActive = async () => {
-          return await page.evaluate(() => {
-            const el = Array.from(document.querySelectorAll('button, div, span')).find(e => 
-              e.textContent?.trim() === 'DeepThink' || e.innerText?.trim() === 'DeepThink'
-            );
-            if (!el) return false;
-            
+
+        // 2. Enable thinking in Instant mode (replaces Expert-mode R1 reasoning)
+        const THINKING_LABELS = ['DeepThink', 'Thinking'];
+
+        const checkThinkingActive = async () => {
+          return await page.evaluate((labels) => {
+            const el = Array.from(document.querySelectorAll('button, div, span')).find(e => {
+              const text = (e.textContent || e.innerText || '').trim();
+              return labels.includes(text);
+            });
+            if (!el) return null;
+
             const btn = el.closest('button') || el.closest('[role="button"]') || el;
             const style = window.getComputedStyle(btn);
             const bg = style.backgroundColor || '';
@@ -341,30 +345,34 @@ class DeepSeekBrowser {
               }
               return false;
             })();
-            
-            const hasCheckedAttr = btn.getAttribute('aria-checked') === 'true' || 
+
+            const hasCheckedAttr = btn.getAttribute('aria-checked') === 'true' ||
                                    btn.getAttribute('aria-selected') === 'true' ||
                                    btn.classList.contains('active') ||
                                    btn.classList.contains('checked') ||
                                    btn.classList.contains('selected');
-                                    
+
             return isBlue || hasCheckedAttr;
-          });
+          }, THINKING_LABELS);
         };
-        
-        const deepThinkActive = await checkDeepThinkActive();
-        const shouldBeActive = isR1; // DeepThink is R1
-        
-        if (deepThinkActive !== shouldBeActive) {
-          logger.info(`Toggling DeepThink to ${shouldBeActive ? 'ON' : 'OFF'}`);
-          const deepThinkBtn = page.locator('button, div, span').filter({ hasText: /^DeepThink$/ }).first();
-          if (await deepThinkBtn.count() > 0) {
-            await deepThinkBtn.click();
+
+        const shouldThinkingBeActive = isR1;
+        const thinkingActive = await checkThinkingActive();
+
+        if (thinkingActive === null && shouldThinkingBeActive) {
+          logger.warn('Thinking toggle not found on page after switching to Instant mode');
+        } else if (thinkingActive !== null && thinkingActive !== shouldThinkingBeActive) {
+          logger.info(`Toggling thinking to ${shouldThinkingBeActive ? 'ON' : 'OFF'} in Instant mode`);
+          const thinkBtn = page.locator('button, div, span').filter({
+            hasText: new RegExp(`^(${THINKING_LABELS.join('|')})$`, 'i'),
+          }).first();
+          if (await thinkBtn.count() > 0) {
+            await thinkBtn.click();
             await page.waitForTimeout(1000);
           }
         }
-        
-        logger.success(`Switched model on tab ${tabName} to ${targetLabel} (${targetMode} mode, DeepThink: ${shouldBeActive ? 'ON' : 'OFF'})`);
+
+        logger.success(`Switched model on tab ${tabName} to ${targetLabel} (${targetMode} mode, Thinking: ${shouldThinkingBeActive ? 'ON' : 'OFF'})`);
         return;
       }
       
@@ -904,6 +912,7 @@ class DeepSeekBrowser {
       .replace(/<think>[\s\S]*?<\/think>\n?/gi, "")
       .replace(/^Thinking\.{0,3}\n[\s\S]*?\n\n/m, "")
       .replace(/^\d+(?:Copy|Run|Insert|Edit)\b.*$/gm, "")
+      .replace(/^\s*(?:Copy|Download|Run|Insert|Edit)\s*$/gim, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
   }

@@ -7,6 +7,41 @@ const READ_ONLY_TOOLS = new Set([
   'http_get', 'get_file_info', 'find_file', 'get_diagnostics',
 ]);
 
+function stripUiNoise(text) {
+  return text
+    .replace(/^\s*(?:Copy|Download|Run|Insert|Edit)\s*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function toolCallFromParsedObject(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const name = parsed.name || parsed.tool || parsed.function;
+  const args = parsed.args || parsed.arguments || parsed.parameters || parsed.input || {};
+  if (name && typeof name === 'string') return { name, args };
+  return null;
+}
+
+function parseJsonToolObject(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = attemptJsonFix(raw);
+  }
+  return toolCallFromParsedObject(parsed);
+}
+
+function buildToolCallParseResult(calls, rawText) {
+  if (calls.length > 1) {
+    return { type: 'tool_calls', calls, raw: rawText };
+  }
+  if (calls.length === 1) {
+    return { type: 'tool_call', name: calls[0].name, args: calls[0].args, raw: rawText };
+  }
+  return null;
+}
+
 /**
  * Extract ALL tool_call fenced blocks from text.
  * Returns an array of { name, args } objects (may be empty).
@@ -16,19 +51,46 @@ function parseAllToolCalls(text) {
   const fenceRe = /```tool_call\s*([\s\S]*?)```/gi;
   let m;
   while ((m = fenceRe.exec(text)) !== null) {
-    const raw = m[1].trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      parsed = attemptJsonFix(raw);
-    }
-    if (!parsed) continue;
-    const name = parsed.name || parsed.tool || parsed.function;
-    const args = parsed.args || parsed.arguments || parsed.parameters || parsed.input || {};
-    if (name && typeof name === 'string') results.push({ name, args });
+    const call = parseJsonToolObject(m[1].trim());
+    if (call) results.push(call);
   }
   return results;
+}
+
+/**
+ * Extract ALL generic fenced JSON tool calls.
+ * DeepSeek's web UI often emits plain ``` blocks (no tool_call tag) after a
+ * "tool_call" header — one block per requested tool.
+ */
+function parseAllJsonFenceToolCalls(text) {
+  const results = [];
+  const fenceRe = /```(?:json|tool_call)?\s*([\s\S]*?)```/gi;
+  let m;
+  while ((m = fenceRe.exec(text)) !== null) {
+    const raw = m[1].trim();
+    if (!raw.startsWith('{')) continue;
+    const call = parseJsonToolObject(raw);
+    if (call) results.push(call);
+  }
+  return results;
+}
+
+/**
+ * Merge multiple extraction passes while preserving first-seen order and
+ * dropping exact duplicates (same tool + args JSON).
+ */
+function mergeToolCalls(...lists) {
+  const merged = [];
+  const seen = new Set();
+  for (const list of lists) {
+    for (const call of list) {
+      const key = `${call.name}:${JSON.stringify(call.args || {})}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(call);
+    }
+  }
+  return merged;
 }
 
 /**
@@ -41,46 +103,24 @@ function parseAllToolCalls(text) {
  *   { type: 'error',     message: string,            raw: string }
  */
 function parseResponse(rawText) {
-  // Sanitize encoding artifacts first, then strip thinking blocks
-  const text = stripThinkingBlocks(fixUnicode(rawText)).trim();
+  // Sanitize encoding artifacts first, then strip thinking blocks / UI chrome
+  const text = stripUiNoise(stripThinkingBlocks(fixUnicode(rawText))).trim();
 
-  // ── Strategy 0 (DOM FALLBACK): bare "tool_call\n{ ... }" ─────────────────
-  const bareMatch = text.match(/^tool_call\s*\n([\s\S]+)$/i);
-  if (bareMatch) {
-    const jsonRaw = bareMatch[1].trim();
-    try {
-      const parsed = JSON.parse(jsonRaw);
-      const name   = parsed.name || parsed.tool || parsed.function;
-      const args   = parsed.args || parsed.arguments || parsed.parameters || parsed.input || {};
-      if (name && typeof name === 'string') {
-        return { type: 'tool_call', name, args, raw: rawText };
-      }
-    } catch {
-      const fixed = attemptJsonFix(jsonRaw);
-      if (fixed) {
-        const name = fixed.name || fixed.tool || fixed.function;
-        const args = fixed.args || fixed.arguments || fixed.parameters || fixed.input || {};
-        if (name) return { type: 'tool_call', name, args, raw: rawText };
-      }
-    }
-  }
+  // ── Strategy 1 (PRIMARY): fenced tool_call / JSON blocks ─────────────────
+  // Supports DeepSeek web UI batches: repeated "tool_call" headers + ``` JSON.
+  const allCalls = mergeToolCalls(
+    parseAllToolCalls(text),
+    parseAllJsonFenceToolCalls(text),
+  );
+  const fencedResult = buildToolCallParseResult(allCalls, rawText);
+  if (fencedResult) return fencedResult;
 
-  // ── Strategy 1 (PRIMARY): ```tool_call fenced code block(s) ──────────────
-  // Extract ALL tool_call blocks — support parallel multi-tool responses
-  const allCalls = parseAllToolCalls(text);
-  if (allCalls.length > 1) {
-    return { type: 'tool_calls', calls: allCalls, raw: rawText };
-  }
-  if (allCalls.length === 1) {
-    return { type: 'tool_call', name: allCalls[0].name, args: allCalls[0].args, raw: rawText };
-  }
-
-  // ── Strategy 1b: single fenced block with JSON parse error reporting ───────
+  // ── Strategy 1b: invalid ```tool_call JSON ───────────────────────────────
   const fencedMatch = text.match(/```tool_call\s*([\s\S]*?)```/i);
   if (fencedMatch) {
     const raw = fencedMatch[1].trim();
     try {
-      JSON.parse(raw); // already handled above — this catches invalid JSON only
+      JSON.parse(raw);
     } catch (e) {
       return {
         type    : 'error',
@@ -90,17 +130,11 @@ function parseResponse(rawText) {
     }
   }
 
-  // ── Strategy 2: ```json block with "name"/"tool" key ──────────────────────
-  const jsonFenceMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-  if (jsonFenceMatch) {
-    try {
-      const parsed = JSON.parse(jsonFenceMatch[1]);
-      const name   = parsed.name || parsed.tool || parsed.function;
-      const args   = parsed.args || parsed.arguments || parsed.parameters || parsed.input || {};
-      if (name && typeof name === 'string') {
-        return { type: 'tool_call', name, args, raw: rawText };
-      }
-    } catch {}
+  // ── Strategy 0 (DOM FALLBACK): bare "tool_call\n{ ... }" ─────────────────
+  const bareMatch = text.match(/^tool_call\s*\n([\s\S]+)$/i);
+  if (bareMatch) {
+    const call = parseJsonToolObject(bareMatch[1].trim());
+    if (call) return { type: 'tool_call', name: call.name, args: call.args, raw: rawText };
   }
 
   // ── Strategy 3: XML <tool_call> ───────────────────────────────────────────
@@ -305,8 +339,11 @@ function isAskingQuestion(text) {
 module.exports = {
   parseResponse,
   parseAllToolCalls,
+  parseAllJsonFenceToolCalls,
+  mergeToolCalls,
   READ_ONLY_TOOLS,
   formatToolResult,
   stripThinkingBlocks,
+  stripUiNoise,
   isAskingQuestion,
 };
