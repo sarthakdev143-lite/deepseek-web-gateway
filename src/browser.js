@@ -3,9 +3,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
 const config = require('./config');
 const logger = require('./logger');
+const browserPool = require('./shared-browser-pool');
 
 // Global error boundary for browser.js
 process.on('unhandledRejection', (reason, promise) => {
@@ -118,43 +118,26 @@ class DeepSeekBrowser {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async launch() {
-    logger.info('Launching browser with persistent session...');
-
-    const sessionDir = path.resolve(config.SESSION_DIR);
-    const cookiesFile = path.join(sessionDir, 'cookies.json');
-
-    let cookies = [];
-    if (fs.existsSync(cookiesFile)) {
-      try {
-        cookies = JSON.parse(fs.readFileSync(cookiesFile, 'utf8'));
-        logger.success('Loaded saved cookies — attempting silent login...');
-      } catch (e) {
-        logger.warn('Could not load cookies: ' + e.message);
+    if (this.context && !this._closed) {
+      if (!this.pages.has('default')) {
+        const defaultPage = await this.context.newPage();
+        this.pages.set('default', defaultPage);
+        this.activeTab = 'default';
+        await defaultPage.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        });
+        this._attachCrashRecovery('default', defaultPage);
+        await this._navigate(config.DEEPSEEK_URL);
+        await this._ensureLoggedIn();
       }
+      return;
     }
 
-    this.context = await chromium.launchPersistentContext(sessionDir, {
-      headless: config.HEADLESS,
-      viewport: null,
-      userAgent: [
-        'Mozilla/5.0 (X11; Linux x86_64)',
-        'AppleWebKit/537.36 (KHTML, like Gecko)',
-        'Chrome/124.0.0.0 Safari/537.36',
-      ].join(' '),
-      args: [
-        '--start-maximized',
-        '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--disable-default-apps',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-      ],
-      ignoreDefaultArgs: ['--enable-automation'],
-    });
+    this.context = await browserPool.acquire();
+    this._usesSharedContext = true;
 
-    // Grab existing page or open a new one
-    const pages = this.context.pages();
-    const defaultPage = pages.length > 0 ? pages[0] : await this.context.newPage();
+    // Each agent gets its own tab — never reuse another session's page.
+    const defaultPage = await this.context.newPage();
     this.pages.set('default', defaultPage);
     this.activeTab = 'default';
 
@@ -166,17 +149,13 @@ class DeepSeekBrowser {
     // Attach crash / close recovery
     this._attachCrashRecovery('default', defaultPage);
 
-    // Inject saved cookies
-    if (cookies.length > 0) {
-      await this.context.addCookies(cookies);
-      logger.dim(`Injected ${cookies.length} cookies`);
-    }
-
     await this._navigate(config.DEEPSEEK_URL);
     const needsLogin = await this._ensureLoggedIn();
 
     // Save cookies after login
     if (needsLogin) {
+      const sessionDir = path.resolve(config.SESSION_DIR);
+      const cookiesFile = path.join(sessionDir, 'cookies.json');
       const newCookies = await this.context.cookies();
       fs.mkdirSync(sessionDir, { recursive: true });
       fs.writeFileSync(cookiesFile, JSON.stringify(newCookies, null, 2), 'utf8');
@@ -240,7 +219,23 @@ class DeepSeekBrowser {
   async close() {
     if (this._closed) return;
     this._closed = true;
+
+    for (const [, page] of this.pages.entries()) {
+      try {
+        if (!page.isClosed()) await page.close();
+      } catch { /* page may already be gone */ }
+    }
+    this.pages.clear();
+    this.adaptiveSelectors.clear();
+
+    if (this._usesSharedContext) {
+      this.context = null;
+      await browserPool.release();
+      return;
+    }
+
     try { await this.context?.close(); } catch { }
+    this.context = null;
   }
 
   async switchTab(tabName) {
@@ -868,7 +863,7 @@ class DeepSeekBrowser {
       if (el) return true;
     }
 
-    return await this.page.evaluate(() => {
+    return await page.evaluate(() => {
       const stopSelectors = [
         'button[aria-label*="Stop" i]',
         '[class*="stop-gen"]',

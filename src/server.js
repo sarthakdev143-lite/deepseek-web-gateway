@@ -48,8 +48,9 @@ async function validateSession(req, res, next) {
 
   req.session = session;
 
-  // Auto-heal unhealthy sessions
-  if (session.healthMonitor) {
+  // Auto-heal unhealthy sessions. Do not probe the browser while another
+  // request is actively driving it; Playwright checks can disturb generation.
+  if (session.healthMonitor && (session.activeRequests || 0) === 0) {
     const isHealthy = await session.healthMonitor.checkHealth();
     if (!isHealthy) {
       logger.warn(`Session ${sessionId} unhealthy — attempting auto-heal`);
@@ -113,16 +114,11 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
     return res.status(400).json({ error: 'Prompt required' });
   }
 
-  if (!req.session.chatQueues) {
-    req.session.chatQueues = new Map();
-  }
-
   const tabName = tab || 'default';
-  if (!req.session.chatQueues.has(tabName)) {
-    req.session.chatQueues.set(tabName, Promise.resolve());
-  }
 
-  // Queue tasks sequentially per tab to prevent bot-detection bans
+  // Queue tasks sequentially for the whole browser session. The browser
+  // controller owns shared state such as activeTab and WORKING_DIR, so
+  // per-tab parallel runs can race even when they use different pages.
   const executeChat = () => new Promise(async (resolve, reject) => {
     // ── CRITICAL: mark this session as having an active in-flight request.
     // Auto-cleanup will skip sessions where activeRequests > 0, preventing
@@ -150,12 +146,12 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
       }
 
       sessionLogger?.logOrchestration('CHAT_COMPLETE', { tab, model, resultLen: (result || '').length });
-      res.json({ text: result, toolCalls: [] });
+      if (!res.headersSent) res.json({ text: result, toolCalls: [] });
       resolve();
     } catch (err) {
       logger.error(`Chat failed for session ${sessionId} (tab: ${tabName}): ${err.message}`);
       sessionLogger?.logError(`Chat failed: ${err.message}`, { tab, model });
-      res.status(500).json({ error: err.message });
+      if (!res.headersSent) res.status(500).json({ error: err.message });
       reject(err);
     } finally {
       // Always clear heartbeat and decrement active request counter
@@ -164,11 +160,18 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
     }
   });
 
-  // Chain to the queue and ignore failures of previous runs
-  req.session.chatQueues.set(
-    tabName,
-    req.session.chatQueues.get(tabName).then(executeChat).catch(() => executeChat())
-  );
+  if (!req.session.chatQueue) {
+    req.session.chatQueue = Promise.resolve();
+  }
+
+  const queued = req.session.chatQueue.catch(() => {}).then(executeChat);
+  req.session.chatQueue = queued.catch(() => {});
+
+  try {
+    await queued;
+  } catch {
+    // executeChat has already sent the HTTP error response.
+  }
 });
 
 // POST /session/:id/close — shut down and remove session

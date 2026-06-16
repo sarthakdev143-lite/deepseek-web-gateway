@@ -14,6 +14,15 @@ const { parseResponse,
         READ_ONLY_TOOLS }    = require('./parser');
 const { ConversationManager }      = require('./prompt');
 const { getSessionLogger }         = require('./session-logger');
+const {
+  REPEAT_UPLOAD_STUB_THRESHOLD,
+  shouldNeverUpload,
+  shouldUseBrowserUpload,
+  isUploadStubResult,
+  toolFingerprint,
+  readFileInline,
+  uploadSuccessMessage,
+}                                   = require('./read-file-delivery');
 
 // Global error boundary for agent.js
 process.on('unhandledRejection', (reason, promise) => {
@@ -53,8 +62,9 @@ class DeepSeekAgent {
     this.conversations = new Map(); // tabName -> ConversationManager
     this.options       = options;
     this._running      = false;
-    this.sandbox       = null; // Will be initialized on first command execution
-    this.sessionLogger = null; // Set per-run from options or module singleton
+    this.sandbox           = null; // Will be initialized on first command execution
+    this.sessionLogger     = null; // Set per-run from options or module singleton
+    this._toolCallTracker  = new Map(); // fingerprint -> { count, uploadStubCount }
   }
 
   get conversation() {
@@ -105,9 +115,10 @@ class DeepSeekAgent {
    * Returns the final response string.
    */
   async run(task, options = {}) {
-    this._running   = true;
-    const maxIter   = config.MAX_ITERATIONS;
-    const runStart  = Date.now();
+    this._running          = true;
+    this._toolCallTracker  = new Map();
+    const maxIter          = config.MAX_ITERATIONS;
+    const runStart         = Date.now();
 
     // ── 0. Attach session logger ────────────────────────────────────────────
     // Prefer a logger passed via options (created by server.js per session),
@@ -418,47 +429,96 @@ class DeepSeekAgent {
 
   // ── Secure Tool Execution with Sandbox ─────────────────────────────────────
 
+  _trackToolResult(toolName, args, result) {
+    const fp = toolFingerprint(toolName, args);
+    const entry = this._toolCallTracker.get(fp) || { count: 0, uploadStubCount: 0 };
+    entry.count += 1;
+    if (isUploadStubResult(result)) {
+      entry.uploadStubCount += 1;
+    } else {
+      entry.uploadStubCount = 0;
+    }
+    this._toolCallTracker.set(fp, entry);
+    return entry;
+  }
+
+  _shouldForceInlineReadFile(args) {
+    const fp = toolFingerprint('read_file', args);
+    const entry = this._toolCallTracker.get(fp);
+    return (entry?.uploadStubCount || 0) >= REPEAT_UPLOAD_STUB_THRESHOLD;
+  }
+
   async _executeToolSafely(toolName, args) {
     const tab = this.browser.activeTab || 'default';
     
     if (toolName === 'upload_file') {
       const { path: filePath } = args;
-      const absPath = require('path').isAbsolute(filePath) ? filePath : require('path').resolve(config.WORKING_DIR, filePath);
-      if (!require('fs').existsSync(absPath)) {
+      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(config.WORKING_DIR, filePath);
+      if (!fs.existsSync(absPath)) {
         throw new Error(`File not found: ${filePath}`);
       }
-      
+      if (shouldNeverUpload(filePath)) {
+        throw new Error(
+          `Cannot upload "${path.basename(filePath)}" as a DeepSeek attachment — this file type is not exposed to the model. ` +
+          `Use read_file instead; content is returned inline with secrets redacted.`
+        );
+      }
+
       logger.info(`Uploading file ${filePath} directly via browser...`);
       const res = await this.browser.uploadFile(absPath, tab);
       if (res.uploaded) {
-        return `✓ File "${res.fileName}" has been successfully uploaded to the DeepSeek chat context. You can now refer to it in your queries.`;
-      } else {
-        throw new Error(`Browser failed to upload the file. Please try reading it using read_file.`);
+        const lineCount = fs.readFileSync(absPath, 'utf8').split('\n').length;
+        const result = uploadSuccessMessage(res.fileName, lineCount);
+        this._trackToolResult(toolName, args, result);
+        return result;
       }
+      throw new Error(`Browser failed to upload the file. Use read_file for inline content.`);
     }
     
     if (toolName === 'read_file') {
       const { path: filePath, start_line, end_line } = args;
-      const absPath = require('path').isAbsolute(filePath) ? filePath : require('path').resolve(config.WORKING_DIR, filePath);
-      
-      if (require('fs').existsSync(absPath) && !require('fs').statSync(absPath).isDirectory()) {
-        const content = require('fs').readFileSync(absPath, 'utf8');
+      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(config.WORKING_DIR, filePath);
+
+      if (shouldNeverUpload(filePath)) {
+        logger.info(`Returning inline (redacted) read for sensitive file: ${filePath}`);
+        const result = readFileInline(filePath, { start_line, end_line });
+        this._trackToolResult(toolName, args, result);
+        return result;
+      }
+
+      if (this._shouldForceInlineReadFile(args)) {
+        logger.warn(`Forcing inline read for ${filePath} after repeated upload-stub results`);
+        const result = readFileInline(filePath, {
+          start_line,
+          end_line,
+          note: '⚠ Previous read_file calls returned an attachment stub but content was not visible. Inline copy:',
+        });
+        this._trackToolResult(toolName, args, result);
+        return result;
+      }
+
+      if (fs.existsSync(absPath) && !fs.statSync(absPath).isDirectory()) {
+        const content   = fs.readFileSync(absPath, 'utf8');
         const lineCount = content.split('\n').length;
-        
-        // Prefer browser upload for full-file reads so content stays as attachments,
-        // not pasted inline (especially important for multi-file batches).
-        if (start_line == null && end_line == null) {
+
+        if (shouldUseBrowserUpload(filePath, lineCount, start_line, end_line)) {
           logger.info(`File ${filePath} has ${lineCount} lines. Attempting direct upload...`);
           try {
             const res = await this.browser.uploadFile(absPath, tab);
             if (res.uploaded) {
-              return `✓ File "${res.fileName}" (${lineCount} lines) was uploaded directly to DeepSeek chat context. Refer to it in your queries — do not re-request this file.`;
+              const result = uploadSuccessMessage(res.fileName, lineCount);
+              this._trackToolResult(toolName, args, result);
+              return result;
             }
           } catch (err) {
             logger.warn(`Failed to upload ${filePath}: ${err.message}. Falling back to inline text.`);
           }
         }
       }
+
+      const inlineResult = await executeTool(toolName, args);
+      this._trackToolResult(toolName, args, inlineResult);
+      return inlineResult;
     }
 
     if (toolName !== 'run_command') {

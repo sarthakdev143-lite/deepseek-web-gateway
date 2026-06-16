@@ -350,7 +350,7 @@ const TOOLS = {
       if (!fs.existsSync(abs)) throw new Error(`Directory not found: ${dirPath}`);
       if (!fs.statSync(abs).isDirectory()) throw new Error(`${dirPath} is not a directory`);
 
-      const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage']);
+      const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', 'venv', '.venv', '__pycache__']);
 
       if (recursive) {
         const results = [];
@@ -549,7 +549,7 @@ const TOOLS = {
       const dir = resolve(directory);
       const flags = case_sensitive ? '' : 'i';
       const results = [];
-      const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage']);
+      const SKIP = new Set(['node_modules', '.git', 'dist', '.next', 'build', 'coverage', 'venv', '.venv', '__pycache__']);
 
       const walk = (currentDir, depth = 0) => {
         if (depth > 10) return;
