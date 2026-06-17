@@ -175,6 +175,28 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
 });
 
 // POST /session/:id/close — shut down and remove session
+app.post('/session/:id/diagnose', validateSession, async (req, res) => {
+  try {
+    const tab = req.body?.tab || 'default';
+    const result = await req.session.agent.diagnose(tab);
+    req.session.sessionLogger?.logOrchestration('DIAGNOSE', result);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/session/:id/tab/recreate', validateSession, async (req, res) => {
+  try {
+    const tab = req.body?.tab || 'default';
+    const result = await req.session.agent.recreateTab(tab);
+    req.session.sessionLogger?.logOrchestration('TAB_RECREATE', result);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/session/:id/close', async (req, res) => {
   const sessionId = req.params.id;
   // Close the logger before destroying session

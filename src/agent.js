@@ -110,6 +110,40 @@ class DeepSeekAgent {
     await this.browser.close();
   }
 
+  async diagnose(tab = 'default') {
+    await this.browser.switchTab(tab);
+    const artifactDir = path.join(config.WORKING_DIR || process.cwd(), '.seekcode', 'diagnostics');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const screenshotPath = path.join(artifactDir, `${stamp}-${tab}-screenshot.png`);
+    await this.browser.screenshot(screenshotPath, tab).catch(() => {});
+    const { page } = this.browser._resolveTab(tab);
+    const domPath = path.join(artifactDir, `${stamp}-${tab}-dom.txt`);
+    const dom = await page.evaluate(() => ({
+      url: window.location.href,
+      title: document.title,
+      text: (document.body?.innerText || '').slice(0, 12000),
+      html: (document.body?.outerHTML || '').slice(0, 12000),
+      openRequestsHint: performance.getEntriesByType('resource').slice(-25).map(r => ({
+        name: r.name,
+        initiatorType: r.initiatorType,
+        duration: r.duration,
+      })),
+    }));
+    fs.writeFileSync(domPath, JSON.stringify(dom, null, 2), 'utf8');
+    return { screenshotPath, domPath, url: dom.url, title: dom.title };
+  }
+
+  async recreateTab(tab = 'default') {
+    const page = this.browser.pages.get(tab);
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+    this.browser.pages.delete(tab);
+    this.browser.adaptiveSelectors.delete(tab);
+    await this.browser.switchTab(tab);
+    await this.browser.newChat(tab);
+    return { tab, recreated: true };
+  }
+
   /**
    * Run a task to completion.
    * Returns the final response string.
