@@ -1,117 +1,61 @@
-// src/logger.js — ANSI-colored terminal output (no dependencies)
 'use strict';
 
-const A = {
-  reset   : '\x1b[0m',
-  bold    : '\x1b[1m',
-  dim     : '\x1b[2m',
-  red     : '\x1b[31m',
-  green   : '\x1b[32m',
-  yellow  : '\x1b[33m',
-  blue    : '\x1b[34m',
-  magenta : '\x1b[35m',
-  cyan    : '\x1b[36m',
-  white   : '\x1b[37m',
-  gray    : '\x1b[90m',
-  lred    : '\x1b[91m',
-  lgreen  : '\x1b[92m',
-  lyellow : '\x1b[93m',
-  lblue   : '\x1b[94m',
-  lmagenta: '\x1b[95m',
-  lcyan   : '\x1b[96m',
-};
+const timestamp = () => new Date().toISOString();
 
-const c  = (code, text) => `${A[code]}${text}${A.reset}`;
-const cb = (code, text) => `${A.bold}${A[code]}${text}${A.reset}`;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-function truncDisplay(str, max = 400) {
-  if (!str) return '';
-  const s = String(str);
-  if (s.length <= max) return s;
-  return s.slice(0, max) + c('gray', `… (+${s.length - max} chars)`);
+function log(level, message, extra = {}) {
+  const entry = { timestamp: timestamp(), level, message, ...extra };
+  console.log(JSON.stringify(entry));
 }
 
-function jsonPreview(obj, max = 350) {
-  const s = JSON.stringify(obj, null, 2);
-  return truncDisplay(s, max);
-}
-
-// ── Public logger API ─────────────────────────────────────────────────────────
 const logger = {
   banner() {
-    console.log(`
-${c('cyan','╔══════════════════════════════════════════════════╗')}
-${c('cyan','║')}   ${cb('lcyan','🤖  DeepSeek Browser Agent')}                     ${c('cyan','║')}
-${c('cyan','║')}   ${c('gray','AI Coding Agent via Browser Automation')}         ${c('cyan','║')}
-${c('cyan','║')}   ${c('gray','No API key needed — uses chat.deepseek.com')}     ${c('cyan','║')}
-${c('cyan','╚══════════════════════════════════════════════════╝')}
-`);
+    const bannerMsg = `
+╔══════════════════════════════════════════════════╗
+║   🤖  DeepSeek Browser Agent                     ║
+║   AI Coding Agent via Browser Automation         ║
+║   No API key needed — uses chat.deepseek.com     ║
+╚══════════════════════════════════════════════════╝
+`;
+    log('banner', bannerMsg.trim());
   },
 
   header(msg) {
-    const line = '─'.repeat(50);
-    console.log(`\n${c('blue', line)}`);
-    console.log(`${c('bold','📋 ')}${cb('white', msg)}`);
-    console.log(`${c('blue', line)}\n`);
+    log('header', msg);
   },
 
-  info(msg)    { console.log(`${c('lblue','  ℹ ')} ${msg}`); },
-  success(msg) { console.log(`${c('lgreen','  ✓ ')} ${c('lgreen', msg)}`); },
-  warn(msg)    { console.log(`${c('lyellow','  ⚠ ')} ${c('lyellow', msg)}`); },
-  error(msg)   { console.log(`${c('lred','  ✗ ')} ${c('lred', msg)}`); },
-  dim(msg)     { console.log(`${A.dim}    ${msg}${A.reset}`); },
+  info(msg)    { log('info', msg); },
+  success(msg) { log('success', msg); },
+  warn(msg)    { log('warn', msg); },
+  error(msg)   { log('error', msg); },
+  dim(msg)     { log('dim', msg); },
 
-  /** Spinner-style line (overwrites itself with \r) */
   thinking(msg) {
-    process.stdout.write(`  ${c('cyan','⟳')} ${c('gray', msg)}\r`);
+    // For JSON, output a thinking log line
+    log('thinking', msg);
   },
 
-  /** Clear the current line */
   clearLine() {
-    process.stdout.write(`\r${' '.repeat(80)}\r`);
+    // No-op for JSON mode
   },
 
-  // ── Tool call display ───────────────────────────────────────────────────────
   toolCall(name, args) {
-    console.log(`\n  ${cb('magenta','⚡ TOOL CALL')} ${c('cyan', `→ ${name}`)}`);
-    const preview = jsonPreview(args);
-    if (preview.trim()) {
-      preview.split('\n').forEach(l => console.log(`  ${c('gray', l)}`));
-    }
+    log('toolCall', name, { args });
   },
 
   toolResult(result, isError = false) {
-    const icon   = isError ? c('lred','  ✗ Result:') : c('lgreen','  ✓ Result:');
-    const text   = truncDisplay(String(result), 300);
-    const color  = isError ? 'lred' : 'gray';
-    console.log(`${icon}`);
-    text.split('\n').slice(0, 12).forEach(l => console.log(`  ${c(color, l)}`));
-    if (String(result).split('\n').length > 12) {
-      console.log(`  ${c('gray','  … (truncated for display)')}`);
-    }
-    console.log('');
+    log('toolResult', String(result), { error: isError });
   },
 
-  // ── Final agent output ──────────────────────────────────────────────────────
   finalOutput(msg) {
-    const line = '━'.repeat(50);
-    console.log(`\n${c('lgreen', line)}`);
-    console.log(`${cb('lgreen','✅  TASK COMPLETE')}`);
-    console.log(`${c('lgreen', line)}\n`);
-    console.log(msg);
-    console.log('');
+    log('finalOutput', msg);
   },
 
-  // ── Section separator ───────────────────────────────────────────────────────
   separator(label = '') {
-    const pad = label ? ` ${label} ` : '';
-    console.log(`\n${c('gray', '·'.repeat(20) + pad + '·'.repeat(20))}\n`);
+    log('separator', label || 'separator');
   },
 
-  // ── Iteration marker ────────────────────────────────────────────────────────
   iteration(n, max) {
-    console.log(`\n${c('gray','  ┄')} ${c('dim',`Step ${n}/${max}`)} ${c('gray','┄')}`);
+    log('iteration', `Step ${n}/${max}`, { n, max });
   },
 };
 
