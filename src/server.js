@@ -104,7 +104,7 @@ app.post('/session/create', async (req, res) => {
   }
 });
 
-// POST /session/:id/chat — run a task prompt
+// POST /session/:id/chat — run a task prompt (legacy, non-streaming)
 app.post('/session/:id/chat', validateSession, async (req, res) => {
   const { prompt, tab, model, readOnly } = req.body;
   const { agent, healthMonitor, workingDir, sessionLogger } = req.session;
@@ -194,6 +194,80 @@ app.post('/session/:id/tab/recreate', validateSession, async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /session/:id/chat/stream — stream response via SSE
+app.post('/session/:id/chat/stream', validateSession, async (req, res) => {
+  const { prompt, tab, model, readOnly } = req.body;
+  const { agent, healthMonitor, workingDir, sessionLogger } = req.session;
+  const sessionId = req.params.id;
+
+  if (!prompt) {
+    return res.status(400).json({ error: 'Prompt required' });
+  }
+
+  // Set up SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+
+  // Queue the task
+  const executeStream = () => new Promise(async (resolve, reject) => {
+    sessionManager.incrementActiveRequests(sessionId);
+    const heartbeatInterval = setInterval(
+      () => sessionManager.heartbeat(sessionId),
+      60_000
+    );
+
+    try {
+      sessionLogger?.logOrchestration('CHAT_STREAM_REQUEST', { tab, model, promptLen: (prompt || '').length });
+      
+      let result;
+      if (healthMonitor) {
+        result = await healthMonitor.executeWithProtection(
+          () => agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly }),
+          () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
+        );
+      } else {
+        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly });
+      }
+
+      // Stream the result in chunks (simulated streaming)
+      const chunks = result.match(/.{1,20}/g) || [result];
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        res.write(`data: ${JSON.stringify({ chunk, done: i === chunks.length - 1 })}\n\n`);
+        await new Promise(r => setTimeout(r, 30));
+      }
+
+      sessionLogger?.logOrchestration('CHAT_STREAM_COMPLETE', { tab, model, resultLen: result.length });
+      resolve();
+    } catch (err) {
+      logger.error(`Chat stream failed for session ${sessionId}: ${err.message}`);
+      sessionLogger?.logError(`Chat stream failed: ${err.message}`, { tab, model });
+      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      reject(err);
+    } finally {
+      clearInterval(heartbeatInterval);
+      sessionManager.decrementActiveRequests(sessionId);
+      res.end();
+    }
+  });
+
+  if (!req.session.chatQueue) {
+    req.session.chatQueue = Promise.resolve();
+  }
+  const queued = req.session.chatQueue.catch(() => {}).then(executeStream);
+  req.session.chatQueue = queued.catch(() => {});
+
+  try {
+    await queued;
+  } catch {
+    // error already sent
   }
 });
 
