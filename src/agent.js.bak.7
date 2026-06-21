@@ -91,37 +91,6 @@ class DeepSeekAgent {
     await this.browser.newChat();
   }
 
-  /**
-   * Background-init: kicks off init() without awaiting it. Callers that need
-   * a ready browser (chat, diagnose, recreateTab) should `await agent.ready()`
-   * first. The ready promise resolves on success or rejects on failure (with
-   * a retry baked in). Used by server.js so /session/create can return
-   * instantly instead of blocking ~7s on Playwright launch.
-   */
-  ensureInit() {
-    if (!this._initPromise) {
-      this._initPromise = (async () => {
-        // One retry — browser launch is occasionally flaky on cold start.
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          try {
-            await this.init();
-            return;
-          } catch (err) {
-            if (attempt === 2) throw err;
-            logger.warn(`Background init attempt ${attempt} failed, retrying: ${err.message}`);
-            await new Promise(r => setTimeout(r, 1000));
-          }
-        }
-      })();
-    }
-    return this._initPromise;
-  }
-
-  /** Await background init if one is in progress; no-op if already ready. */
-  ready() {
-    return this._initPromise ? this._initPromise : Promise.resolve();
-  }
-
   /** Shut down cleanly */
   async shutdown() {
     // Clean up sandbox if it exists

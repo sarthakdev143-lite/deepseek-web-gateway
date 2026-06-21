@@ -58,22 +58,6 @@ app.use((req, res, next) => {
 // ─────────────────────────────────────────────
 //  Session factory with retry
 // ─────────────────────────────────────────────
-// Construct an agent and START background init, but return immediately.
-// Browser launch (Playwright + DeepSeek navigation + login wait) takes ~5-7s
-// on a cold gateway; doing it synchronously made /session/create block the
-// HTTP response. Now we kick it off in the background and the first chat
-// request awaits agent.ready() before driving the browser. If init fails
-// outright (after the agent's internal retry), the ready() promise rejects
-// and the next chat request surfaces a 503.
-function createAgentBackground() {
-  const agent = new DeepSeekAgent({ saveLog: false, silent: true });
-  agent.ensureInit(); // fire-and-forget; errors land on the ready() promise
-  return agent;
-}
-
-// Legacy synchronous constructor — kept for any caller that genuinely needs
-// to block until ready (none in the current codebase, but preserved for
-// backwards compat with index.js CLI one-shots).
 async function createAgentWithRetry(maxRetries = 3) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -108,24 +92,6 @@ async function validateSession(req, res, next) {
 
   req.session = session;
 
-  // Wait for background browser init to complete (cold-start latency hides
-  // here instead of blocking /session/create). If init already failed, 503.
-  if (session.agent && typeof session.agent.ready === 'function') {
-    if (session.initError) {
-      return res.status(503).json({
-        error: `Session failed to initialize: ${session.initError}. Create a new session.`,
-      });
-    }
-    try {
-      await session.agent.ready();
-    } catch (err) {
-      session.initError = err.message;
-      return res.status(503).json({
-        error: `Session failed to initialize: ${err.message}. Create a new session.`,
-      });
-    }
-  }
-
   // Auto-heal unhealthy sessions. Do not probe the browser while another
   // request is actively driving it; Playwright checks can disturb generation.
   if (session.healthMonitor && (session.activeRequests || 0) === 0) {
@@ -149,14 +115,10 @@ async function validateSession(req, res, next) {
 //  Routes
 // ─────────────────────────────────────────────
 
-// POST /session/create — register a session instantly; browser launches in
-// the background. Returns immediately with status:'initializing'. The first
-// /chat or /chat/stream request awaits the agent's ready() promise before
-// driving the browser, so the cold-start latency is hidden behind the user's
-// typing/thinking time instead of blocking session creation.
+// POST /session/create — boot a browser agent
 app.post('/session/create', async (req, res) => {
   try {
-    const agent = createAgentBackground();
+    const agent = await createAgentWithRetry(3);
     const workingDir = req.body?.workingDir || null;
 
     const sessionId = sessionManager.createSession(agent);
@@ -173,17 +135,10 @@ app.post('/session/create', async (req, res) => {
     session.sessionLogger = sessionLogger;
     sessionManager.updateMetadata(sessionId, { createdAt: new Date().toISOString(), workingDir });
 
-    // Surface init failures on the session so validateSession can 503 early
-    // rather than making the user wait for the first chat to discover it.
-    agent.ensureInit().catch((err) => {
-      logger.error(`Background init failed for session ${sessionId}: ${err.message}`);
-      session.initError = err.message;
-    });
-
-    // Respond immediately — don't wait for the browser.
+    // Return the log file path so clients can record it in their own traces
     res.json({
       sessionId,
-      status        : 'initializing',
+      status        : 'ready',
       ttl           : sessionManager.sessionTTL,
       sessionLogPath: sessionLogger.path,
     });
