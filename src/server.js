@@ -228,7 +228,11 @@ app.post('/session/:id/chat/stream', validateSession, async (req, res) => {
   });
 
   let clientGone = false;
-  req.on('close', () => { clientGone = true; });
+  // Minimal abort-signal object — the agent.run() loop checks .aborted between
+  // iterations so a Stop-button disconnect actually halts the run instead of
+  // driving DeepSeek through the full conversation to a dead socket.
+  const abortSignal = { aborted: false };
+  req.on('close', () => { clientGone = true; abortSignal.aborted = true; });
 
   const sendEvent = (type, data = {}) => {
     if (clientGone) return;
@@ -279,6 +283,7 @@ app.post('/session/:id/chat/stream', validateSession, async (req, res) => {
       const runOpts = {
         tab, model, workingDir, sessionLogger, readOnly,
         sessionId,
+        abortSignal,
         onToken, onToolCall, onThinking,
       };
       if (healthMonitor) {

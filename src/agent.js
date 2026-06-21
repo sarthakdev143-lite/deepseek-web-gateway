@@ -215,6 +215,16 @@ class DeepSeekAgent {
       ConversationPersister.append(persistSessionId, entry);
     };
 
+    // ── 0d. Abort signal (optional) ─────────────────────────────────────────
+    // server.js flips this when the client disconnects (Stop button). The loop
+    // checks it between iterations so we don't keep driving DeepSeek after the
+    // user has gone away. The currently-in-flight waitForResponse/streamListen
+    // still completes (Playwright has no clean mid-poll cancel), but no further
+    // iterations fire and partial output is preserved.
+    const abortSignal = options.abortSignal || null;
+    const isAborted = () => !!(abortSignal && abortSignal.aborted);
+    let abortedRun = false;
+
     // ── 1. Apply per-session working directory ──────────────────────────────
     if (options.workingDir) {
       config.WORKING_DIR = options.workingDir;
@@ -268,6 +278,16 @@ class DeepSeekAgent {
 
     // ── 5. Agent loop ───────────────────────────────────────────────────────
     for (let iter = 1; iter <= maxIter; iter++) {
+      // Honor client abort between iterations. The in-flight browser call
+      // can't be cancelled cleanly, so we let the current iteration finish
+      // but bail before starting the next model round-trip.
+      if (isAborted()) {
+        abortedRun = true;
+        logger.warn('⛔ Abort signal received — stopping agent loop.');
+        slog?.logWarn('Run aborted by client', { iter, totalDurationMs: Date.now() - runStart });
+        break;
+      }
+
       logger.iteration(iter, maxIter);
       slog?.logOrchestration('ITERATION_START', { iter, maxIter, tab, model });
 
@@ -306,6 +326,14 @@ class DeepSeekAgent {
           : (parsed.type === 'tool_call' ? [{ name: parsed.name, args: parsed.args }] : []),
         iteration: iter,
       });
+
+      // Honor abort after the response arrives — skip tool execution if the
+      // user has already stopped. The assistant message is preserved above.
+      if (isAborted()) {
+        abortedRun = true;
+        logger.warn('⛔ Abort signal received after response — skipping tool execution.');
+        break;
+      }
 
       // ── Case 0: Multiple tool calls — parallel where safe ──────────────────
       if (parsed.type === 'tool_calls') {

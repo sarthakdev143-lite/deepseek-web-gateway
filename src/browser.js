@@ -1142,13 +1142,53 @@ class DeepSeekBrowser {
   _cleanText(text) {
     if (!text) return '';
 
-    return sanitizeUnicode(text)
+    let out = sanitizeUnicode(text)
       .replace(/<think>[\s\S]*?<\/think>\n?/gi, "")
       .replace(/^Thinking\.{0,3}\n[\s\S]*?\n\n/m, "")
+      // DeepSeek R1 web UI renders the reasoning trace with a literal
+      // "Thought for N second(s)" header followed by the reasoning prose,
+      // then a blank line, then the actual answer. Strip the header + prose,
+      // keep only the answer. (Anchor on ^ so mid-text mentions are preserved.)
+      .replace(/^Thought for \d+ seconds?\n\n[\s\S]*?\n\n/m, "")
+      // Fallback for the no-blank-line variant: strip just the header line.
+      .replace(/^Thought for \d+ seconds?\n+/, "")
       .replace(/^\d+(?:Copy|Run|Insert|Edit)\b.*$/gm, "")
       .replace(/^\s*(?:Copy|Download|Run|Insert|Edit)\s*$/gim, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
+
+    // Conservative reasoning-trace stripper for the case where R1 emits its
+    // reasoning as plain prose WITHOUT the "Thought for" header. Only fires
+    // when there are 2+ blank-line-separated paragraphs AND the first paragraph
+    // matches a strong reasoning marker (1+) OR multiple weak ones (2+). Keeps
+    // the final paragraph as the answer. The strong/weak split avoids
+    // over-stripping legit multi-paragraph answers that happen to start with "I".
+    const paragraphs = out.split(/\n\n+/);
+    if (paragraphs.length >= 2) {
+      const first = paragraphs[0];
+      const strongMarkers = [
+        /\bThe user (asks|wants|needs|is asking)\b/i,
+        /\bI will (output|respond|answer|write|provide)\b/i,
+        /\bI'll (output|respond|answer|write|provide)\b/i,
+        /\bstep[- ]by[- ]step\b/i,
+      ];
+      const weakMarkers = [
+        /\bLet me\b/i,
+        /\bI need to\b/i,
+        /\bI should\b/i,
+        /\bI('m| am) going to\b/i,
+        /\bWe need to\b/i,
+        /\bThis is a simple\b/i,
+      ];
+      const strongHits = strongMarkers.filter((m) => m.test(first)).length;
+      const weakHits = weakMarkers.filter((m) => m.test(first)).length;
+      if (strongHits >= 1 || weakHits >= 2) {
+        const lastPara = paragraphs[paragraphs.length - 1].trim();
+        if (lastPara) out = lastPara;
+      }
+    }
+
+    return out;
   }
 
   async dumpDebugInfo() {
