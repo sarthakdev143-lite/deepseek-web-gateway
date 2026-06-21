@@ -4,9 +4,12 @@ const fs   = require('fs');
 const path = require('path');
 const config = require('./config');
 
-// Secret redaction — inlined in ./utils so the gateway is self-contained
-// (previously reached across into the sibling `seekcode` package).
-const { redact } = require('./utils');
+let redact;
+try {
+  redact = require(path.join(__dirname, '../../seekcode/src/utils/redact')).redact;
+} catch {
+  redact = s => s;
+}
 
 /** Full-file reads above this line count may use DeepSeek attachment upload. */
 const UPLOAD_LINE_THRESHOLD = 150;

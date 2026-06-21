@@ -224,7 +224,6 @@ class DeepSeekAgent {
     const abortSignal = options.abortSignal || null;
     const isAborted = () => !!(abortSignal && abortSignal.aborted);
     let abortedRun = false;
-    let budgetExhausted = false;
 
     // ── 1. Apply per-session working directory ──────────────────────────────
     if (options.workingDir) {
@@ -279,7 +278,6 @@ class DeepSeekAgent {
 
     // ── 5. Agent loop ───────────────────────────────────────────────────────
     for (let iter = 1; iter <= maxIter; iter++) {
-      this._lastIter = iter;
       // Honor client abort between iterations. The in-flight browser call
       // can't be cancelled cleanly, so we let the current iteration finish
       // but bail before starting the next model round-trip.
@@ -287,21 +285,6 @@ class DeepSeekAgent {
         abortedRun = true;
         logger.warn('⛔ Abort signal received — stopping agent loop.');
         slog?.logWarn('Run aborted by client', { iter, totalDurationMs: Date.now() - runStart });
-        break;
-      }
-
-      // Wall-clock budget — hard cap independent of MAX_ITERATIONS. Prevents
-      // the runaway "999 iters × 30-min response" scenario. The currently
-      // in-flight browser call still completes (can't cancel mid-poll), but
-      // we bail before the next iteration and surface a clear warning.
-      const elapsedMs = Date.now() - runStart;
-      if (config.RUN_BUDGET_MS && elapsedMs > config.RUN_BUDGET_MS) {
-        const mins = Math.floor(elapsedMs / 60_000);
-        logger.warn(`⏱️  Wall-clock budget exhausted (${mins}min > ${Math.floor(config.RUN_BUDGET_MS / 60_000)}min) — stopping agent loop.`);
-        slog?.logWarn('Run budget exhausted', {
-          iter, elapsedMs, budgetMs: config.RUN_BUDGET_MS,
-        });
-        budgetExhausted = true;
         break;
       }
 
@@ -526,34 +509,11 @@ class DeepSeekAgent {
       }
     }
 
-    // ── Loop exited without a final response ─────────────────────────────────
-    // `iterationsCompleted` is tracked outside the for-scope so the post-loop
-    // block can reference it even when the loop bailed on iteration 1.
+    // ── Hit max iterations ───────────────────────────────────────────────────
     this._running = false;
-    const totalMs = Date.now() - runStart;
-    const totalMin = Math.floor(totalMs / 60_000);
-    const iterationsCompleted = Math.max(0, (this._lastIter || 1) - 1);
-
-    if (abortedRun) {
-      const msg = `⛔ Run aborted by client after ${totalMin}min (${iterationsCompleted} iteration(s) completed). Partial output preserved in the conversation.`;
-      logger.warn(msg);
-      persist({ type: 'aborted', iterations: iterationsCompleted, durationMs: totalMs });
-      return msg;
-    }
-
-    if (budgetExhausted) {
-      const budgetMin = Math.floor((config.RUN_BUDGET_MS || 0) / 60_000);
-      const msg = `⏱️ Wall-clock budget exhausted after ${totalMin}min (cap: ${budgetMin}min, ${iterationsCompleted} iteration(s) completed). The task may be incomplete. Override with SEEKCODE_RUN_BUDGET_MS.`;
-      logger.warn(msg);
-      slog?.logWarn('Run budget exhausted (terminal)', { iterations: iterationsCompleted, totalMs, budgetMs: config.RUN_BUDGET_MS });
-      persist({ type: 'budget_exhausted', iterations: iterationsCompleted, durationMs: totalMs });
-      return msg;
-    }
-
-    // Default: hit MAX_ITERATIONS without a final answer.
     const warn = `⚠ Reached maximum iterations (${maxIter}). The task may be incomplete.`;
     logger.warn(warn);
-    slog?.logWarn('Max iterations reached', { maxIter, totalDurationMs: totalMs });
+    slog?.logWarn('Max iterations reached', { maxIter, totalDurationMs: Date.now() - runStart });
     return warn;
   }
 

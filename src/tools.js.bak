@@ -22,10 +22,12 @@ function isReadOnly()     { return _readOnly; }
 
 const activeServers = new Map(); // name -> { proc, port, command, workDir, getLogs }
 
-// Windows-safe command sanitizer — inlined in ./utils so the gateway is
-// self-contained (previously reached across into the sibling `seekcode`
-// package, which silently fell back to a no-op if that package was missing).
-const { sanitizeCommand } = require('./utils');
+let sanitizeCommand;
+try {
+  sanitizeCommand = require(path.join(__dirname, '../../seekcode/src/utils/platformCommands')).sanitizeCommand;
+} catch (e) {
+  sanitizeCommand = cmd => cmd;
+}
 
 
 // ─────────────────────────────────────────────

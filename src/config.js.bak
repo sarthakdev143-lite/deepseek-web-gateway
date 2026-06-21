@@ -20,12 +20,6 @@ const defaults = {
 
   // Agent
   MAX_ITERATIONS   : 999,
-  // Wall-clock budget for a single agent.run() — hard cap INDEPENDENT of
-  // MAX_ITERATIONS. Prevents the theoretical "999 iters × 30-min response =
-  // 21 days" runaway. Default 4 hours; override with SEEKCODE_RUN_BUDGET_MS.
-  // The agent checks this between iterations and bails gracefully (preserving
-  // whatever output was produced) when the budget is exhausted.
-  RUN_BUDGET_MS    : Number(process.env.SEEKCODE_RUN_BUDGET_MS) || (4 * 60 * 60 * 1000),
   WORKING_DIR      : process.cwd(),
 
   // Output — raised to handle 100K+ token responses (unlimited Continue clicks)

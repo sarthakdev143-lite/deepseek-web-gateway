@@ -7,11 +7,16 @@ const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 
-// Redact secrets from log output — inlined in ./utils so the gateway is
-// self-contained (previously reached across into the sibling `seekcode`
-// package, which silently fell back to no-op redaction if that package was
-// missing).
-const { redact: _redact, redactObject: _redactObj } = require('./utils');
+// Redact secrets from log output
+let _redact, _redactObj;
+try {
+  const r = require(path.join(__dirname, '../../seekcode/src/utils/redact'));
+  _redact    = r.redact;
+  _redactObj = r.redactObject;
+} catch {
+  _redact    = s => s;
+  _redactObj = o => o;
+}
 
 // ─────────────────────────────────────────────
 //  Log directory

@@ -12,49 +12,6 @@ const { ConversationPersister } = require('./conversation-persister');
 const app = express();
 app.use(express.json());
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Security configuration (Phase 6c)
-//
-//  AUTH_TOKEN: if set (SEEKCODE_AUTH_TOKEN env var), every non-/health request
-//  must carry it as `Authorization: Bearer <token>` or `?token=<token>`. Empty
-//  by default — set it in production so a random port scan can't drive the
-//  browser. When unset, auth is skipped (local dev convenience).
-//
-//  REQUEST_TIMEOUT_MS: hard cap on NON-STREAM endpoints (default 5min). SSE
-//  stream routes are exempt because legitimate streams run for minutes while
-//  tokens arrive — the agent.run() wall-clock budget (Phase 6a) bounds those.
-//  Override with SEEKCODE_REQUEST_TIMEOUT_MS.
-// ─────────────────────────────────────────────────────────────────────────────
-const AUTH_TOKEN = process.env.SEEKCODE_AUTH_TOKEN || '';
-const REQUEST_TIMEOUT_MS = Number(process.env.SEEKCODE_REQUEST_TIMEOUT_MS) || (5 * 60 * 1000);
-
-// Token-auth middleware. Exempts /health (liveness probes must work unauth'd).
-function requireAuth(req, res, next) {
-  if (!AUTH_TOKEN) return next(); // no token configured → open mode (local dev)
-  if (req.path === '/health') return next();
-
-  const header = req.headers.authorization || '';
-  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const queryToken = req.query && req.query.token ? String(req.query.token) : '';
-  if (bearer === AUTH_TOKEN || queryToken === AUTH_TOKEN) return next();
-
-  logger.warn(`Auth rejected: ${req.method} ${req.path} from ${req.ip}`);
-  return res.status(401).json({ error: 'Unauthorized — provide Authorization: Bearer <token> or ?token=<token>' });
-}
-app.use(requireAuth);
-
-// Request timeout for non-stream endpoints. Streams self-terminate via the
-// agent's wall-clock budget; capping them here would kill legitimate long chats.
-app.use((req, res, next) => {
-  if (req.path.endsWith('/chat/stream')) return next(); // SSE — exempt
-  req.setTimeout(REQUEST_TIMEOUT_MS, () => {
-    if (!res.headersSent) {
-      res.status(504).json({ error: `Request timed out after ${REQUEST_TIMEOUT_MS}ms` });
-    }
-  });
-  next();
-});
-
 // ─────────────────────────────────────────────
 //  Session factory with retry
 // ─────────────────────────────────────────────
@@ -449,7 +406,6 @@ process.on('SIGINT', async () => {
 });
 
 const PORT = process.env.PORT || 8080;
-const config = require('./config');
 app.listen(PORT, () => {
   console.log('═'.repeat(55));
   console.log('  DeepSeek Web Gateway — HTTP API');
@@ -457,21 +413,8 @@ app.listen(PORT, () => {
   console.log('  Endpoints:');
   console.log('    GET  /health               — health check');
   console.log('    GET  /sessions             — list active sessions');
-  console.log('    GET  /sessions/history     — list persisted conversations');
-  console.log('    GET  /sessions/:id/history — load one conversation');
   console.log('    POST /session/create       — create agent session');
-  console.log('    POST /session/:id/chat     — send task prompt (non-stream)');
-  console.log('    POST /session/:id/chat/stream — SSE streaming chat');
+  console.log('    POST /session/:id/chat     — send task prompt');
   console.log('    POST /session/:id/close    — close session');
-  console.log('─'.repeat(55));
-  console.log('  Security:');
-  console.log('    Auth: ' + (AUTH_TOKEN ? 'ENABLED (Bearer token required)' : 'DISABLED — set SEEKCODE_AUTH_TOKEN in production'));
-  console.log(`    Non-stream request timeout: ${REQUEST_TIMEOUT_MS}ms`);
-  console.log(`    Agent wall-clock budget: ${Math.floor((config.RUN_BUDGET_MS || 0) / 60_000)}min (SEEKCODE_RUN_BUDGET_MS)`);
   console.log('═'.repeat(55));
-  if (!AUTH_TOKEN) {
-    console.log('  ⚠️  WARNING: no auth token set. Anyone who can reach this port can');
-    console.log('      drive a browser that executes shell commands. Set SEEKCODE_AUTH_TOKEN.');
-    console.log('═'.repeat(55));
-  }
 });
