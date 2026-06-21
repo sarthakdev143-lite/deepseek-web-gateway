@@ -14,7 +14,6 @@ const { parseResponse,
         READ_ONLY_TOOLS }    = require('./parser');
 const { ConversationManager }      = require('./prompt');
 const { getSessionLogger }         = require('./session-logger');
-const { ConversationPersister }    = require('./conversation-persister');
 const {
   REPEAT_UPLOAD_STUB_THRESHOLD,
   shouldNeverUpload,
@@ -135,43 +134,14 @@ class DeepSeekAgent {
     return { screenshotPath, domPath, url: dom.url, title: dom.title };
   }
 
-  /**
-   * Recreate a crashed/closed tab and (optionally) replay the persisted
-   * conversation back into the fresh ConversationManager so the agent retains
-   * context across the crash. `sessionId` should match the one server.js used
-   * for the original run; if omitted, no replay happens (legacy behaviour).
-   */
-  async recreateTab(tab = 'default', sessionId = null) {
+  async recreateTab(tab = 'default') {
     const page = this.browser.pages.get(tab);
     if (page && !page.isClosed()) await page.close().catch(() => {});
     this.browser.pages.delete(tab);
     this.browser.adaptiveSelectors.delete(tab);
     await this.browser.switchTab(tab);
     await this.browser.newChat(tab);
-
-    // Reset this tab's conversation and replay persisted turns (if any).
-    // Re-inject as conversation context — do NOT re-send to the model (the
-    // model has no memory of the prior tab; the next user message will carry
-    // this context forward via buildPrompt's "RECENT CONVERSATION" section).
-    this.conversations.delete(tab);
-    let replayed = 0;
-    if (sessionId) {
-      const history = ConversationPersister.load(sessionId);
-      if (history.length > 0) {
-        logger.info(`Replaying ${history.length} persisted entries into tab "${tab}"...`);
-        const conv = this.conversation; // lazily creates a fresh ConversationManager
-        for (const entry of history) {
-          if (entry.type === 'turn' && (entry.role === 'user' || entry.role === 'assistant')) {
-            conv.addMessage(entry.role, entry.content);
-            replayed++;
-          }
-          // tool_result / final entries are skipped — they're summaries, not
-          // things the model needs to see verbatim in its context window.
-        }
-      }
-    }
-
-    return { tab, recreated: true, replayed };
+    return { tab, recreated: true };
   }
 
   /**
@@ -202,17 +172,6 @@ class DeepSeekAgent {
       if (ev.type === 'token' && onToken) onToken(ev.content);
       else if (ev.type === 'thinking' && onThinking) onThinking(ev);
       // 'done' is internal — agent.run() resolves when iteration completes.
-    };
-
-    // ── 0c. Conversation persistence (optional) ─────────────────────────────
-    // If a sessionId is threaded through (server.js passes it for every chat
-    // request), append each user/assistant turn to a JSONL file so the
-    // conversation survives gateway restarts and tab crashes. Best-effort —
-    // persister never throws.
-    const persistSessionId = options.sessionId || null;
-    const persist = (entry) => {
-      if (!persistSessionId) return;
-      ConversationPersister.append(persistSessionId, entry);
     };
 
     // ── 1. Apply per-session working directory ──────────────────────────────
@@ -256,10 +215,6 @@ class DeepSeekAgent {
       conversation.messages.push({ role: 'user', content: firstMsg });
     }
 
-    // Persist the user's original task (not the full system prompt) so the
-    // conversation transcript stays human-readable on restore.
-    persist({ type: 'turn', role: 'user', content: task });
-
     // Log the outgoing request
     slog?.logRequest(firstMsg, { tab, model, round: 0 });
 
@@ -294,18 +249,6 @@ class DeepSeekAgent {
 
       // Parse the response
       const parsed = parseResponse(rawResponse);
-
-      // Persist the assistant message + any tool calls it contained (the tool
-      // results are appended below as each tool executes).
-      persist({
-        type: 'turn',
-        role: 'assistant',
-        content: rawResponse,
-        toolCalls: parsed.type === 'tool_calls'
-          ? parsed.calls
-          : (parsed.type === 'tool_call' ? [{ name: parsed.name, args: parsed.args }] : []),
-        iteration: iter,
-      });
 
       // ── Case 0: Multiple tool calls — parallel where safe ──────────────────
       if (parsed.type === 'tool_calls') {
@@ -371,11 +314,6 @@ class DeepSeekAgent {
           .map(({ call, result, isError }) => formatToolResult(call.name, result, isError))
           .join('\n\n');
 
-        // Persist each tool result for replay-on-restore.
-        for (const r of results.filter(Boolean)) {
-          persist({ type: 'tool_result', name: r.call.name, result: r.result, isError: r.isError });
-        }
-
         const feedbackMsg = conversation.addBatchToolResults(combined);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'parallel_batch_result' });
         await this.browser.sendMessage(feedbackMsg, tab);
@@ -420,7 +358,6 @@ class DeepSeekAgent {
 
         const feedbackMsg = conversation.addToolResult(parsed.name, result, isError);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'tool_feedback' });
-        persist({ type: 'tool_result', name: parsed.name, result, isError });
         await this.browser.sendMessage(feedbackMsg, tab);
         continue;
       }
@@ -472,9 +409,6 @@ class DeepSeekAgent {
         if (this.options.saveLog) {
           await this._saveConversationLog(task, parsed.content);
         }
-
-        // Mark the conversation as completed (terminal marker for restore UI).
-        persist({ type: 'final', content: parsed.content, iterations: iter, durationMs: Date.now() - runStart });
 
         this._running = false;
         return parsed.content;

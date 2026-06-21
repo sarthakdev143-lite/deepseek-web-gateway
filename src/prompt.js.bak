@@ -141,42 +141,13 @@ function buildUserTask(task) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Conversation manager
-//
-//  Agent.js calls these methods on the conversation object:
-//    .turnCount                (getter)
-//    .buildFirstMessage(task, dirListing)
-//    .addAssistantMessage(rawResponse)
-//    .addBatchToolResults(combined)   -> returns the message string
-//    .addToolResult(name, result, isError)  -> returns the message string
-//    .exportLog()
-//    .addMessage(role, content)        (already existed)
-//  All of them are implemented here so the prompt rewrite is a true drop-in.
+//  Conversation manager (preserved from original — minimal changes)
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** Inline tool-result formatter (kept local to avoid a parser.js dependency). */
-function formatToolResult(name, result, isError = false) {
-  const status = isError ? 'ERROR' : 'SUCCESS';
-  const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-  return `[TOOL ${status}] ${name}\n${resultStr}`;
-}
 
 class ConversationManager {
   constructor() {
     this.messages = [];
     this.maxMessages = 20; // keep last 20 turns in prompt; older go to summary
-    // Context that buildFirstMessage needs but isn't known at construction.
-    // Set by the agent before the first turn (see agent.js run()).
-    this.workingDir = null;
-    this.situationReport = null;
-    this.readOnly = false;
-    this.tab = null;
-    this.model = null;
-  }
-
-  /** Number of assistant turns observed so far (used to gate retry logic). */
-  get turnCount() {
-    return this.messages.filter(m => m.role === 'assistant').length;
   }
 
   addMessage(role, content) {
@@ -196,61 +167,6 @@ class ConversationManager {
     const older = this.messages.slice(0, -6);
     if (older.length === 0) return '';
     return older.map(m => `[${m.role}] ${m.content.slice(0, 200)}`).join('\n');
-  }
-
-  /**
-   * Build the first outgoing message for a new task.
-   * This is the FULL system prompt — identity + rules + output format + tools
-   * + environment + situation report + working-dir listing + the user task.
-   * Returns the composed string ready to send to DeepSeek.
-   */
-  buildFirstMessage(task, dirListing) {
-    // readOnly is enforced at the tools layer; reflect it in the prompt so the
-    // model knows not to even attempt write/command tools.
-    let readOnly = this.readOnly;
-    if (!readOnly) {
-      try {
-        const { isReadOnly } = require('./tools');
-        readOnly = !!isReadOnly();
-      } catch { /* tools module not loaded — skip */ }
-    }
-    return buildPrompt({
-      task,
-      workingDir: this.workingDir,
-      situationReport: this.situationReport,
-      conversation: null, // first turn — no recent history to include
-      readOnly,
-      tab: this.tab,
-      model: this.model,
-      dirListing,
-    });
-  }
-
-  /** Record an assistant response verbatim. */
-  addAssistantMessage(rawResponse) {
-    this.addMessage('assistant', rawResponse);
-  }
-
-  /**
-   * Append a batch of tool results as a single user message and return the
-   * exact string the agent should send to DeepSeek next.
-   */
-  addBatchToolResults(combined) {
-    const content = typeof combined === 'string' ? combined : String(combined);
-    this.addMessage('user', content);
-    return content;
-  }
-
-  /** Format a single tool result, append it, and return the message string. */
-  addToolResult(name, result, isError = false) {
-    return this.addBatchToolResults(formatToolResult(name, result, isError));
-  }
-
-  /** Human-readable transcript of the whole conversation (used for log dumps). */
-  exportLog() {
-    return this.messages
-      .map(m => `[${(m.role || 'unknown').toUpperCase()}]\n${m.content}`)
-      .join('\n\n');
   }
 
   clear() {
@@ -273,7 +189,6 @@ class ConversationManager {
  * @param {boolean} [opts.readOnly] — read-only mode active
  * @param {string} [opts.tab] — current tab name
  * @param {string} [opts.model] — current model name
- * @param {string} [opts.dirListing] — working-directory file listing (first turn only)
  * @returns {string} the full system prompt
  */
 function buildPrompt(opts = {}) {
@@ -285,7 +200,6 @@ function buildPrompt(opts = {}) {
     readOnly,
     tab,
     model,
-    dirListing,
   } = opts;
 
   const parts = [];
@@ -304,16 +218,6 @@ function buildPrompt(opts = {}) {
 
   // 5. Environment
   parts.push(buildEnvironment(workingDir));
-
-  // 5b. Working directory listing (first turn only — model can list_directory later)
-  if (dirListing && dirListing.trim().length > 0) {
-    parts.push([
-      'WORKING DIRECTORY CONTENTS',
-      '--------------------------',
-      dirListing,
-      '',
-    ].join('\n'));
-  }
 
   // 6. Read-only warning (if active)
   if (readOnly) {

@@ -7,7 +7,6 @@ const { SessionManager } = require('./session-manager');
 const { HealthMonitor } = require('./health');
 const logger = require('./logger');
 const { createSessionLogger } = require('./session-logger');
-const { ConversationPersister } = require('./conversation-persister');
 
 const app = express();
 app.use(express.json());
@@ -139,11 +138,11 @@ app.post('/session/:id/chat', validateSession, async (req, res) => {
 
       if (healthMonitor) {
         result = await healthMonitor.executeWithProtection(
-          () => agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly, sessionId }),
+          () => agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly }),
           () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
         );
       } else {
-        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly, sessionId });
+        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly });
       }
 
       sessionLogger?.logOrchestration('CHAT_COMPLETE', { tab, model, resultLen: (result || '').length });
@@ -190,8 +189,7 @@ app.post('/session/:id/diagnose', validateSession, async (req, res) => {
 app.post('/session/:id/tab/recreate', validateSession, async (req, res) => {
   try {
     const tab = req.body?.tab || 'default';
-    const sessionId = req.params.id; // thread through so recreateTab can replay
-    const result = await req.session.agent.recreateTab(tab, sessionId);
+    const result = await req.session.agent.recreateTab(tab);
     req.session.sessionLogger?.logOrchestration('TAB_RECREATE', result);
     res.json(result);
   } catch (err) {
@@ -200,15 +198,6 @@ app.post('/session/:id/tab/recreate', validateSession, async (req, res) => {
 });
 
 // POST /session/:id/chat/stream — stream response via SSE
-//
-// Emits TWO parallel event shapes on the same SSE stream for backward compat:
-//   (a) Typed events:    { type: 'token'|'tool_call_start'|'tool_call_result'|
-//                               'thinking'|'done'|'error', ... }
-//       — consumed by the new useStreamingChat hook (Phase 4 GUI).
-//   (b) Legacy events:   { chunk: string, done: boolean }
-//       — consumed by the existing useChat hook. Emitted on every token AND a
-//         final {chunk:'', done:true}. This keeps the current GUI working while
-//         the new GUI consumes the richer typed events.
 app.post('/session/:id/chat/stream', validateSession, async (req, res) => {
   const { prompt, tab, model, readOnly } = req.body;
   const { agent, healthMonitor, workingDir, sessionLogger } = req.session;
@@ -218,35 +207,13 @@ app.post('/session/:id/chat/stream', validateSession, async (req, res) => {
     return res.status(400).json({ error: 'Prompt required' });
   }
 
-  // Set up SSE headers. X-Accel-Buffering disables nginx/proxy buffering.
+  // Set up SSE headers
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'Access-Control-Allow-Origin': '*',
-    'X-Accel-Buffering': 'no',
   });
-
-  let clientGone = false;
-  req.on('close', () => { clientGone = true; });
-
-  const sendEvent = (type, data = {}) => {
-    if (clientGone) return;
-    try {
-      res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
-    } catch {
-      clientGone = true;
-    }
-  };
-  // Legacy {chunk, done} shape for the existing useChat.ts hook.
-  const sendLegacyChunk = (chunk, done) => {
-    if (clientGone) return;
-    try {
-      res.write(`data: ${JSON.stringify({ chunk, done })}\n\n`);
-    } catch {
-      clientGone = true;
-    }
-  };
 
   // Queue the task
   const executeStream = () => new Promise(async (resolve, reject) => {
@@ -256,65 +223,38 @@ app.post('/session/:id/chat/stream', validateSession, async (req, res) => {
       60_000
     );
 
-    const runStart = Date.now();
-
     try {
       sessionLogger?.logOrchestration('CHAT_STREAM_REQUEST', { tab, model, promptLen: (prompt || '').length });
-      sendEvent('session_started', { sessionId });
-
-      // Streaming callbacks — surfaced through agent.run via onToken/onToolCall.
-      const onToken = (content) => {
-        sendEvent('token', { content });
-        sendLegacyChunk(content, false);
-      };
-      const onToolCall = (ev) => {
-        // ev is { type: 'tool_call_start'|'tool_call_result', ... } from agent
-        sendEvent(ev.type, ev);
-      };
-      const onThinking = () => {
-        sendEvent('thinking', { elapsedMs: Date.now() - runStart });
-      };
-
+      
       let result;
-      const runOpts = {
-        tab, model, workingDir, sessionLogger, readOnly,
-        sessionId,
-        onToken, onToolCall, onThinking,
-      };
       if (healthMonitor) {
         result = await healthMonitor.executeWithProtection(
-          () => agent.run(prompt, runOpts),
+          () => agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly }),
           () => ({ text: 'Circuit breaker active — please retry in a moment', fallback: true })
         );
       } else {
-        result = await agent.run(prompt, runOpts);
+        result = await agent.run(prompt, { tab, model, workingDir, sessionLogger, readOnly });
       }
 
-      // Ensure the final answer text was streamed (agent emits it as tokens in
-      // stream mode, but defensive fallback for buffered-mode results).
-      if (typeof result === 'string' && result.length > 0) {
-        // The agent already emitted tokens in stream mode; only emit if we're
-        // certain nothing was streamed (e.g. circuit-breaker fallback).
-        if (result.fallback || /Circuit breaker active/.test(result)) {
-          sendEvent('token', { content: result });
-        }
+      // Stream the result in chunks (simulated streaming)
+      const chunks = result.match(/.{1,20}/g) || [result];
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        res.write(`data: ${JSON.stringify({ chunk, done: i === chunks.length - 1 })}\n\n`);
+        await new Promise(r => setTimeout(r, 30));
       }
 
-      sendEvent('done', { totalDurationMs: Date.now() - runStart, resultLength: typeof result === 'string' ? result.length : 0 });
-      sendLegacyChunk('', true);
-
-      sessionLogger?.logOrchestration('CHAT_STREAM_COMPLETE', { tab, model, resultLen: typeof result === 'string' ? result.length : 0 });
+      sessionLogger?.logOrchestration('CHAT_STREAM_COMPLETE', { tab, model, resultLen: result.length });
       resolve();
     } catch (err) {
       logger.error(`Chat stream failed for session ${sessionId}: ${err.message}`);
       sessionLogger?.logError(`Chat stream failed: ${err.message}`, { tab, model });
-      sendEvent('error', { message: err.message });
-      try { sendLegacyChunk('', true); } catch {}
+      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
       reject(err);
     } finally {
       clearInterval(heartbeatInterval);
       sessionManager.decrementActiveRequests(sessionId);
-      try { res.end(); } catch {}
+      res.end();
     }
   });
 
@@ -348,30 +288,6 @@ app.get('/sessions', (req, res) => {
     metadata: sessionManager.sessions.get(id)?.metadata || {},
   }));
   res.json({ stats, sessions });
-});
-
-// GET /sessions/history — list all PERSISTED conversations (survive restart).
-// Distinct from GET /sessions (in-memory only). Used by the GUI's HistorySidebar
-// to populate the conversation list across browser/agent restarts.
-app.get('/sessions/history', (req, res) => {
-  const sessions = ConversationPersister.listSessions();
-  res.json({ sessions, count: sessions.length });
-});
-
-// GET /sessions/:id/history — full JSONL transcript for one session.
-// Returns the raw entries; the GUI renders them as a chat thread on restore.
-app.get('/sessions/:id/history', (req, res) => {
-  const history = ConversationPersister.load(req.params.id);
-  if (history.length === 0) {
-    return res.status(404).json({ error: 'No persisted history for session', sessionId: req.params.id });
-  }
-  res.json({ sessionId: req.params.id, entries: history, count: history.length });
-});
-
-// DELETE /sessions/:id/history — remove a persisted conversation file.
-app.delete('/sessions/:id/history', (req, res) => {
-  const removed = ConversationPersister.delete(req.params.id);
-  res.json({ sessionId: req.params.id, removed });
 });
 
 // GET /health — liveness probe

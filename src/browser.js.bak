@@ -115,62 +115,6 @@ class DeepSeekBrowser {
     return { page, adaptiveSelector: selector };
   }
 
-  // ── Safe evaluate wrappers ────────────────────────────────────────────────
-  // DeepSeek re-renders chunks mid-stream (auto-clicked "Continue", R1 chunk
-  // boundaries, model switches). That destroys page.evaluate's execution
-  // context mid-call → "Execution context was destroyed" / "Target closed".
-  // These wrappers retry-with-backoff so a transient reflow doesn't crash a
-  // 30-minute run. Strategy: wait for DOM readiness, evaluate, retry on nav
-  // errors up to MAX_ATTEMPTS times.
-
-  static _isNavError(err) {
-    const msg = String(err && err.message || err);
-    return /Execution context was destroyed|Target closed|Navigation|frame was detached/i.test(msg);
-  }
-
-  async safeEvaluate(page, fn, ...args) {
-    const MAX_ATTEMPTS = 3;
-    const BASE_DELAY_MS = 500;
-    let lastErr;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        // Wait for the page to settle before evaluating. Non-fatal — if the
-        // page is gone entirely, the evaluate below will throw a catchable err.
-        if (page && typeof page.waitForLoadState === 'function') {
-          await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
-        }
-        return await page.evaluate(fn, ...args);
-      } catch (err) {
-        lastErr = err;
-        if (!DeepSeekBrowser._isNavError(err) || attempt === MAX_ATTEMPTS) throw err;
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        logger.warn(`page.evaluate failed (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${delay}ms: ${err.message}`);
-        await new Promise(r => setTimeout(r, delay));
-      }
-    }
-    throw lastErr;
-  }
-
-  /** ElementHandle-scoped variant — same retry semantics for `el.evaluate(...)`. */
-  async safeElementEvaluate(el, fn, ...args) {
-    const MAX_ATTEMPTS = 3;
-    const BASE_DELAY_MS = 500;
-    let lastErr;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        return await el.evaluate(fn, ...args);
-      } catch (err) {
-        lastErr = err;
-        // If the element is detached/gone, retrying won't help — bail now.
-        if (!DeepSeekBrowser._isNavError(err) || attempt === MAX_ATTEMPTS) throw err;
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        logger.warn(`element.evaluate failed (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${delay}ms: ${err.message}`);
-        await new Promise(r => setTimeout(r, delay));
-      }
-    }
-    throw lastErr;
-  }
-
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async launch() {
@@ -328,7 +272,7 @@ class DeepSeekBrowser {
       const targetLabel = isR1 ? 'DeepSeek-R1' : 'DeepSeek-V3';
       
       // ── New Tab/Toggle UI check (Instant/Expert & DeepThink) ────────────────
-      const hasTabs = await this.safeEvaluate(page, () => {
+      const hasTabs = await page.evaluate(() => {
         return !!Array.from(document.querySelectorAll('button, div, span')).find(e => 
           e.textContent?.trim() === 'Expert' || e.textContent?.trim() === 'Instant'
         );
@@ -338,7 +282,7 @@ class DeepSeekBrowser {
         logger.dim(`Detected Tab/Toggle model selection UI on tab ${tabName}`);
         
         // 1. Resolve current active mode (Instant vs Expert)
-        const currentMode = await this.safeEvaluate(page, () => {
+        const currentMode = await page.evaluate(() => {
           const text = document.body.innerText || '';
           if (text.includes('Start chatting with Expert')) return 'Expert';
           if (text.includes('Start chatting with Instant')) return 'Instant';
@@ -376,7 +320,7 @@ class DeepSeekBrowser {
         const THINKING_LABELS = ['DeepThink', 'Thinking'];
 
         const checkThinkingActive = async () => {
-          return await this.safeEvaluate(page, (labels) => {
+          return await page.evaluate((labels) => {
             const el = Array.from(document.querySelectorAll('button, div, span')).find(e => {
               const text = (e.textContent || e.innerText || '').trim();
               return labels.includes(text);
@@ -507,7 +451,7 @@ class DeepSeekBrowser {
     const { page } = this._resolveTab(tabName);
     await page.waitForTimeout(2_000);
 
-    const needsLogin = await this.safeEvaluate(page, () => {
+    const needsLogin = await page.evaluate(() => {
       const url = window.location.href;
       const bodyText = document.body?.innerText || '';
       return (
@@ -578,7 +522,7 @@ class DeepSeekBrowser {
     if (isTextarea) {
       await el.fill(text);
     } else {
-      await this.safeEvaluate(page, (element, content) => {
+      await page.evaluate((element, content) => {
         element.focus();
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
@@ -602,8 +546,8 @@ class DeepSeekBrowser {
     if (adaptiveSelector) {
       const el = await adaptiveSelector.findElement('chatInput');
       if (el) {
-        const tagName = await this.safeElementEvaluate(el, e => e.tagName.toLowerCase());
-        const isContentEditable = await this.safeElementEvaluate(el, e => e.isContentEditable);
+        const tagName = await el.evaluate(e => e.tagName.toLowerCase());
+        const isContentEditable = await el.evaluate(e => e.isContentEditable);
         return { el, isTextarea: tagName === 'textarea' && !isContentEditable };
       }
     }
@@ -612,8 +556,8 @@ class DeepSeekBrowser {
       try {
         const el = await page.waitForSelector(sel, { timeout: 4_000, state: 'visible' });
         if (!el) continue;
-        const tagName = await this.safeElementEvaluate(el, e => e.tagName.toLowerCase());
-        const isContentEditable = await this.safeElementEvaluate(el, e => e.isContentEditable);
+        const tagName = await el.evaluate(e => e.tagName.toLowerCase());
+        const isContentEditable = await el.evaluate(e => e.isContentEditable);
         return { el, isTextarea: tagName === 'textarea' && !isContentEditable };
       } catch { }
     }
@@ -657,7 +601,7 @@ class DeepSeekBrowser {
     const { page } = this._resolveTab(tabName);
     try {
       // Strategy 1: scan all visible buttons for exact "Continue" text
-      const found = await this.safeEvaluate(page, () => {
+      const found = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
         for (const btn of buttons) {
           const txt = (btn.innerText || btn.textContent || '').trim();
@@ -795,194 +739,11 @@ class DeepSeekBrowser {
     return accumulatedText;
   }
 
-  // ── Streaming Response (real SSE via XHR interception) ─────────────────────
-  //
-  // streamResponse(tabName, text, onEvent):
-  //   Sends `text` via the DOM, then listens for DeepSeek's chat-completion XHR
-  //   and emits {type:'token'|'thinking'|'done', ...} events. Returns the full
-  //   accumulated assistant text. Use this for the FIRST turn of a run (it sends
-  //   + receives).
-  //
-  // streamListen(tabName, onEvent):
-  //   Listen-only variant for SUBSEQUENT turns — assumes the caller has already
-  //   sent the feedback message via sendMessage(). Same events, same fallback.
-  //
-  // Robustness: if no matching XHR is observed within XHR_GRACE_MS, both fall
-  // back to DOM-polling via waitForResponse() and emit the whole thing as a
-  // single token — so callers always get *some* streaming, never a silent hang
-  // when DeepSeek changes their endpoint.
-
-  async streamResponse(tabName, text, onEvent) {
-    const XHR_GRACE_MS = 8000;
-    const { page } = this._resolveTab(tabName);
-
-    // Set up listeners BEFORE sending so we don't miss the first chunk.
-    const ctx = this._startXhrListener(page, onEvent);
-
-    try {
-      this._streamSendStart = Date.now();
-      await this.sendMessage(text, tabName);
-      if (onEvent) onEvent({ type: 'thinking', reason: 'sent' });
-    } catch (err) {
-      ctx.cleanup();
-      throw err;
-    }
-
-    return await this._finishStream(page, tabName, ctx, onEvent, XHR_GRACE_MS);
-  }
-
-  /** Listen-only variant — caller has already sent the message via sendMessage(). */
-  async streamListen(tabName, onEvent) {
-    const XHR_GRACE_MS = 8000;
-    const { page } = this._resolveTab(tabName);
-    this._streamSendStart = Date.now(); // anchor for the grace-window fallback
-    const ctx = this._startXhrListener(page, onEvent);
-    return await this._finishStream(page, tabName, ctx, onEvent, XHR_GRACE_MS);
-  }
-
-  /** Wire up request/response listeners filtered to the completion endpoint. */
-  _startXhrListener(page, onEvent) {
-    const COMPLETION_URL_RE = /chat\.deepseek\.com\/api\/v\d+\.\d+\/chat\/completion/;
-    const state = { accumulated: '', captured: false, resolved: false, bodyBuffer: '', requestSeen: false };
-
-    const onResponse = async (response) => {
-      const url = response.url();
-      if (!COMPLETION_URL_RE.test(url)) return;
-      state.captured = true;
-      try {
-        const body = await response.text();
-        state.bodyBuffer += body;
-        const parsed = this._parseCompletionBody(state.bodyBuffer);
-        if (parsed.text && parsed.text.length > state.accumulated.length) {
-          const delta = parsed.text.slice(state.accumulated.length);
-          state.accumulated = parsed.text;
-          if (onEvent && delta.length > 0) onEvent({ type: 'token', content: delta });
-        }
-        if (parsed.done && !state.resolved) state.resolved = true;
-      } catch (err) {
-        logger.dim(`XHR body read error (non-fatal): ${err.message}`);
-      }
-    };
-    const onRequest = (request) => {
-      if (COMPLETION_URL_RE.test(request.url())) state.requestSeen = true;
-    };
-
-    page.on('response', onResponse);
-    page.on('request', onRequest);
-
-    const cleanup = () => {
-      try { page.off('response', onResponse); } catch {}
-      try { page.off('request', onRequest); } catch {}
-    };
-    return { state, cleanup };
-  }
-
-  /** Wait for the stream to finish (or fall back to DOM polling). */
-  async _finishStream(page, tabName, ctx, onEvent, graceMs) {
-    const { state, cleanup } = ctx;
-    const deadline = Date.now() + (config.RESPONSE_TIMEOUT || 5 * 60_000);
-    let xhrTimedOut = false;
-
-    while (!state.resolved && Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 200));
-      const elapsed = Date.now() - (this._streamSendStart || Date.now());
-      // Grace-window fallback: no matching XHR observed → bail to DOM polling.
-      if (!state.captured && !state.requestSeen && elapsed > graceMs) {
-        xhrTimedOut = true; break;
-      }
-      // Safety: request seen but no body in 30s → give up on XHR path.
-      if (state.requestSeen && !state.captured && elapsed > 30_000) {
-        xhrTimedOut = true; break;
-      }
-    }
-    cleanup();
-
-    let finalText;
-
-    if (state.captured && !xhrTimedOut) {
-      // XHR path succeeded — pick up any DOM tail beyond what XHR carried.
-      try {
-        const domTail = await this._extractLastMessage(tabName);
-        if (domTail && domTail.length > state.accumulated.length) {
-          const delta = domTail.slice(state.accumulated.length);
-          if (delta.trim().length > 0 && onEvent) onEvent({ type: 'token', content: delta });
-          finalText = domTail;
-        } else {
-          finalText = state.accumulated;
-        }
-      } catch {
-        finalText = state.accumulated;
-      }
-      if (onEvent) onEvent({ type: 'done', totalChars: finalText.length });
-      return finalText;
-    }
-
-    // Fallback: DOM polling.
-    logger.warn(`XHR stream not observed within ${graceMs}ms — falling back to DOM polling for [Tab: ${tabName || 'default'}]`);
-    if (onEvent) onEvent({ type: 'thinking', reason: 'dom_poll_fallback' });
-    finalText = await this.waitForResponse(tabName);
-    if (onEvent) {
-      onEvent({ type: 'token', content: finalText });
-      onEvent({ type: 'done', totalChars: finalText.length, fallback: true });
-    }
-    return finalText;
-  }
-
-  /**
-   * Parse a DeepSeek completion response body. Handles two shapes:
-   *   1. SSE stream: "data: {json}\ndata: {json}\ndata: [DONE]\n\n"
-   *   2. Plain JSON: { choices: [{ message: { content } }], ... }
-   * Returns { text: string, done: boolean }.
-   */
-  _parseCompletionBody(body) {
-    let text = '';
-    let done = false;
-
-    const lines = body.split('\n');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const payload = trimmed.slice(5).trim();
-      if (payload === '[DONE]') { done = true; continue; }
-      if (!payload) continue;
-      try {
-        const obj = JSON.parse(payload);
-        // OpenAI-style: choices[0].delta.content (streaming) or .message.content (final)
-        const choice = obj.choices && obj.choices[0];
-        if (!choice) continue;
-        const delta = choice.delta || choice.message || {};
-        if (typeof delta.content === 'string' && delta.content.length > 0) {
-          text += delta.content;
-        }
-        if (choice.finish_reason || obj.done) done = true;
-      } catch {
-        // Not JSON — skip. (Could be a keep-alive comment.)
-      }
-    }
-
-    // If no SSE lines matched, try parsing the whole body as a single JSON object.
-    if (!text && !done) {
-      try {
-        const obj = JSON.parse(body);
-        const choice = obj.choices && obj.choices[0];
-        if (choice) {
-          const msg = choice.message || choice.delta || {};
-          if (typeof msg.content === 'string') text = msg.content;
-          if (choice.finish_reason || obj.done) done = true;
-        }
-      } catch {
-        // Not JSON at all — leave text empty.
-      }
-    }
-
-    return { text, done };
-  }
-
   // ── DOM Extraction ─────────────────────────────────────────────────────────
 
   async _getMessageCount(tabName) {
     const { page } = this._resolveTab(tabName);
-    return await this.safeEvaluate(page, () => {
+    return await page.evaluate(() => {
       const candidates = [
         '[class*="assistant"][class*="message"]',
         '[data-role="assistant"]',
@@ -1001,7 +762,7 @@ class DeepSeekBrowser {
 
   async _extractLastMessage(tabName) {
     const { page } = this._resolveTab(tabName);
-    return await this.safeEvaluate(page, () => {
+    return await page.evaluate(() => {
       function getFullText(el) {
         if (!el) return '';
         let result = '';
@@ -1102,7 +863,7 @@ class DeepSeekBrowser {
       if (el) return true;
     }
 
-    return await this.safeEvaluate(page, () => {
+    return await page.evaluate(() => {
       const stopSelectors = [
         'button[aria-label*="Stop" i]',
         '[class*="stop-gen"]',
@@ -1152,7 +913,7 @@ class DeepSeekBrowser {
   }
 
   async dumpDebugInfo() {
-    const info = await this.safeEvaluate(this.page, () => {
+    const info = await this.page.evaluate(() => {
       const classFreq = {};
       document.querySelectorAll('*').forEach(el => {
         el.classList.forEach(c => {
@@ -1204,7 +965,7 @@ class DeepSeekBrowser {
     const path = require('path');
     
     // ── Check if the page supports file uploads first ───────────────────────
-    const hasUploadCapability = await this.safeEvaluate(page, () => {
+    const hasUploadCapability = await page.evaluate(() => {
       const hasInput = !!document.querySelector('input[type="file"]');
       const buttons = Array.from(document.querySelectorAll('button, div, span'));
       const hasBtn = buttons.some(btn => {
