@@ -2,7 +2,7 @@
   "name": "deepseek-web-gateway",
   "version": "1.0.0",
   "description": "DeepSeek Web Gateway is a local HTTP server that uses Playwright to drive the free DeepSeek web chat UI, providing responses to requests without an API key.",
-  "main": "index.js",
+  "main": "src/index.js",
   "dependencies": {
     "accepts": "^2.0.0",
     "acorn": "^8.16.0",
@@ -108,7 +108,7 @@
     "start:cli": "node src/index.js",
     "start:server": "node src/server.js",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node src/server.js",
     "dev": "ts-node src/index.ts",
     "logs": "node src/view-logs.js",
     "logs:last": "node src/view-logs.js --last",
