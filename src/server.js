@@ -28,6 +28,33 @@ app.use(express.json());
 const AUTH_TOKEN = process.env.SEEKCODE_AUTH_TOKEN || '';
 const REQUEST_TIMEOUT_MS = Number(process.env.SEEKCODE_REQUEST_TIMEOUT_MS) || (5 * 60 * 1000);
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Project-root allowlist (GUI "Open Project" picker security gate)
+//
+//  PROJECT_ROOTS comes from SEEKCODE_PROJECT_ROOTS (semicolon on Windows,
+//  colon on Unix). Empty array = OPEN MODE (dev): any path is allowed.
+//  In production, set the env var so the agent — which has write_file +
+//  run_command — can only be pointed at approved project directories.
+// ─────────────────────────────────────────────────────────────────────────────
+const pathLib = require('path');
+const PROJECT_ROOTS = require('./config').PROJECT_ROOTS || [];
+
+/** Resolve `target` absolute; return true if it equals or is a child of any
+ *  configured root. Empty roots array = open mode (allow all). */
+function isWithinRoots(target) {
+  if (!PROJECT_ROOTS.length) return true; // dev/open mode
+  if (!target) return false;
+  try {
+    const abs = pathLib.resolve(target);
+    return PROJECT_ROOTS.some((root) => {
+      const rootAbs = pathLib.resolve(root);
+      return abs === rootAbs || abs.startsWith(rootAbs + pathLib.sep);
+    });
+  } catch {
+    return false;
+  }
+}
+
 // Token-auth middleware. Exempts /health (liveness probes must work unauth'd).
 function requireAuth(req, res, next) {
   if (!AUTH_TOKEN) return next(); // no token configured → open mode (local dev)
@@ -158,6 +185,16 @@ app.post('/session/create', async (req, res) => {
   try {
     const agent = createAgentBackground();
     const workingDir = req.body?.workingDir || null;
+
+    // Security gate: reject workingDir outside the configured allowlist.
+    // Open mode (no PROJECT_ROOTS) skips this check for dev convenience.
+    if (workingDir && !isWithinRoots(workingDir)) {
+      logger.warn(`Rejecting /session/create — workingDir outside roots: ${workingDir}`);
+      return res.status(400).json({
+        error: 'workingDir outside allowed roots',
+        roots: PROJECT_ROOTS,
+      });
+    }
 
     const sessionId = sessionManager.createSession(agent);
     const healthMonitor = new HealthMonitor(agent);
@@ -467,6 +504,55 @@ app.delete('/sessions/:id/history', (req, res) => {
   res.json({ sessionId: req.params.id, removed });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Project / directory picker endpoints
+//
+//  These power the GUI's "Open Project" modal. /projects/roots exposes the
+//  allowlist so the picker knows where browsing is allowed to start.
+//  /directories/list returns immediate subdirectories of an allowed path so
+//  the picker can render a lazy-expanding folder tree (one level at a time,
+//  cheap, no recursion). Both are auth-gated by the global requireAuth mw.
+// ─────────────────────────────────────────────────────────────────────────────
+const fsLib = require('fs');
+
+// GET /projects/roots — expose the allowlist (empty = open mode)
+app.get('/projects/roots', (req, res) => {
+  res.json({
+    roots: PROJECT_ROOTS,
+    openMode: PROJECT_ROOTS.length === 0,
+  });
+});
+
+// GET /directories/list?path=<dir> — immediate subdirs of an allowed path.
+// Skips hidden dirs and common noise (node_modules, .git, dist, build) so the
+// picker tree stays clean and readable.
+const DIR_SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.cache', 'coverage', '.turbo']);
+app.get('/directories/list', (req, res) => {
+  const target = req.query.path ? String(req.query.path) : '';
+  if (!target) {
+    return res.status(400).json({ error: 'Missing required query param: path' });
+  }
+  if (!isWithinRoots(target)) {
+    return res.status(403).json({ error: 'path outside allowed roots', roots: PROJECT_ROOTS });
+  }
+  let abs;
+  try {
+    abs = pathLib.resolve(target);
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid path', detail: e.message });
+  }
+  fsLib.readdir(abs, { withFileTypes: true }, (err, entries) => {
+    if (err) {
+      return res.status(404).json({ error: 'Cannot read directory', detail: err.message });
+    }
+    const directories = entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !DIR_SKIP.has(e.name))
+      .map((e) => ({ name: e.name, path: pathLib.join(abs, e.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ path: abs, directories });
+  });
+});
+
 // GET /health — liveness probe
 app.get('/health', (req, res) => {
   const stats = sessionManager.getStats();
@@ -508,6 +594,8 @@ app.listen(PORT, () => {
   console.log('    POST /session/:id/chat     — send task prompt (non-stream)');
   console.log('    POST /session/:id/chat/stream — SSE streaming chat');
   console.log('    POST /session/:id/close    — close session');
+  console.log('    GET  /projects/roots       — project allowlist (GUI picker)');
+  console.log('    GET  /directories/list     — list subdirs (GUI folder tree)');
   console.log('─'.repeat(55));
   console.log('  Security:');
   console.log('    Auth: ' + (AUTH_TOKEN ? 'ENABLED (Bearer token required)' : 'DISABLED — set SEEKCODE_AUTH_TOKEN in production'));

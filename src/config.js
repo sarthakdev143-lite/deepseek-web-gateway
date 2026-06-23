@@ -28,6 +28,16 @@ const defaults = {
   RUN_BUDGET_MS    : Number(process.env.SEEKCODE_RUN_BUDGET_MS) || (4 * 60 * 60 * 1000),
   WORKING_DIR      : process.cwd(),
 
+  // Project roots allowlist for the GUI's "Open Project" picker.
+  // Semicolon-separated (Windows) or colon-separated (Unix) via path.delimiter.
+  // Empty array = OPEN MODE (dev convenience): any path accepted.
+  // Set SEEKCODE_PROJECT_ROOTS="C:\code;D:\repos" in production so the agent
+  // (which has write_file + run_command) can only be pointed at allowed dirs.
+  PROJECT_ROOTS    : (process.env.SEEKCODE_PROJECT_ROOTS || '')
+                      .split(path.delimiter)
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+
   // Output — raised to handle 100K+ token responses (unlimited Continue clicks)
   MAX_OUTPUT_LENGTH : 200_000,
   DEBUG             : false,
