@@ -276,6 +276,21 @@ const TOOLS = {
   },
 
   // ── Replace in File ─────────────────────────────────────────────────────────
+  //
+  // Hardening: the previous implementation defaulted `all_occurrences` to TRUE.
+  // That meant a non-unique `find` string silently overwrote EVERY match — the
+  // single most dangerous failure mode for a surgical-edit tool (an AI fixing
+  // one `foo` could rewrite hundreds). It also had no uniqueness guard and a
+  // fragile count path.
+  //
+  // New contract (safer-by-default, fully backward compatible when explicit):
+  //   - all_occurrences defaults to FALSE (opt-in, like every frontier editor).
+  //   - When FALSE and the match is NOT unique, the tool REFUSES with a clear
+  //     error telling the model how many matches exist and to include more
+  //     surrounding context. This turns a silent correctness bug into a loud,
+  //     self-correcting signal — the model re-issues with a wider anchor.
+  //   - all_occurrences: TRUE still works exactly as before (explicit bulk).
+  //   - Regex mode unchanged; uniqueness check runs on the compiled pattern.
   replace_in_file: {
     description: [
       'Find and replace text in a file. This is the PREFERRED tool for editing existing files.',
@@ -286,35 +301,62 @@ const TOOLS = {
       find: { type: 'string', required: true, description: 'Text to find' },
       replace: { type: 'string', required: true, description: 'Replacement text' },
       use_regex: { type: 'boolean', required: false, description: 'Treat "find" as a regex pattern (default: false)' },
-      all_occurrences: { type: 'boolean', required: false, description: 'Replace all occurrences (default: true)' },
+      all_occurrences: { type: 'boolean', required: false, description: 'Replace ALL occurrences. Default FALSE. Only set TRUE for intentional bulk edits — otherwise include enough context in `find` to make it unique.' },
     },
-    async execute({ path: filePath, find, replace, use_regex = false, all_occurrences = true }) {
+    async execute({ path: filePath, find, replace, use_regex = false, all_occurrences = false }) {
       const abs = resolve(filePath);
       // FIXED: existsSync
       if (!fs.existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
-      let content = await fs.promises.readFile(abs, 'utf8');
-      const before = content;
+      // Build the matcher once; reuse it for the count, uniqueness check, and apply.
+      // Non-regex find is escaped so its special characters are treated literally
+      // (previously the count path re-escaped but the apply path used split/join,
+      // so a find containing regex metacharacters could behave inconsistently).
+      const matcher = use_regex
+        ? new RegExp(find, 'g')
+        : new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
 
-      if (use_regex) {
-        const re = new RegExp(find, all_occurrences ? 'g' : '');
-        content = content.replace(re, replace);
-      } else if (all_occurrences) {
-        content = content.split(find).join(replace);
-      } else {
-        content = content.replace(find, replace);
-      }
-
-      if (content === before) {
+      const count = (before.match(matcher) || []).length;
+      if (count === 0) {
         return `⚠  No matches found for "${find}" in ${filePath}`;
       }
 
-      const escapedFind = use_regex ? find : find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const count = (before.match(new RegExp(escapedFind, 'g')) || []).length;
+      // Uniqueness guard: when NOT doing an intentional bulk replace, refuse an
+      // ambiguous edit instead of silently editing the wrong location.
+      if (!all_occurrences && count > 1) {
+        throw new Error(
+          `replace_in_file: "${find}" matched ${count} locations in ${filePath}, but ` +
+          `all_occurrences is false (the safe default). To target ONE location, include ` +
+          `more surrounding lines in \`find\` so it is unique. To replace all ${count} ` +
+          `matches intentionally, set all_occurrences: true.`
+        );
+      }
 
-      await atomicWriteFile(abs, content);
-      await logChange('replace', filePath, `replaced ${count} occurrence(s) of "${find}"`);
-      return `✓ Replaced ${count} occurrence(s) of "${find}" in ${filePath}`;
+      // Apply. For non-bulk, replace only the first match; for bulk, all.
+      const replaced = all_occurrences
+        ? before.replace(matcher, replace)
+        : before.replace(matcher, replace); // matcher already has 'g' flag; for
+
+      // `replace` with a /g flag replaces all occurrences. For first-only we
+      // rebuild a single-match matcher (no 'g' flag) so we touch exactly one.
+      const finalContent = all_occurrences
+        ? replaced
+        : before.replace(
+            use_regex
+              ? new RegExp(find)
+              : new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+            replace
+          );
+
+      if (finalContent === before) {
+        // Defensive: should be unreachable given count>0, but never no-op silently.
+        return `⚠  Match found but replacement produced no change in ${filePath}`;
+      }
+
+      const occurrencesReplaced = all_occurrences ? count : 1;
+      await atomicWriteFile(abs, finalContent);
+      await logChange('replace', filePath, `replaced ${occurrencesReplaced} of ${count} occurrence(s) of "${find}"`);
+      return `✓ Replaced ${occurrencesReplaced} of ${count} occurrence(s) of "${find}" in ${filePath}`;
     },
   },
 
@@ -502,9 +544,26 @@ const TOOLS = {
       command: { type: 'string', required: true, description: 'Shell command to run' },
       cwd: { type: 'string', required: false, description: 'Working directory' },
       timeout: { type: 'number', required: false, description: 'Timeout in ms (default: 60000)' },
+      // The model often emits `timeout_ms` (see the tool description in
+      // prompt.js). Accept it as an alias so the requested deadline is
+      // honoured instead of silently falling back to the 60s default —
+      // which previously killed long installs mid-flight and destabilised
+      // the browser-driven chat loop.
+      timeout_ms: { type: 'number', required: false, description: 'Alias for timeout (ms)' },
       env: { type: 'object', required: false, description: 'Extra environment variables' },
     },
-    async execute({ command, cwd, timeout = 60000, env = {} }) {
+    async execute({ command, cwd, timeout, timeout_ms, env = {} }) {
+      // Resolve the effective deadline: prefer an explicit value, fall back
+      // to the model-friendly alias, then the default. Clamp to a safe band
+      // so a malformed request can't pin a core (too low) or hang forever.
+      const RUN_TIMEOUT_MIN_MS = 5_000;
+      const RUN_TIMEOUT_MAX_MS = 5 * 60_000; // 5 minutes
+      const requested = timeout_ms ?? timeout ?? 60_000;
+      const effectiveTimeout = Math.min(
+        RUN_TIMEOUT_MAX_MS,
+        Math.max(RUN_TIMEOUT_MIN_MS, Number(requested) || 60_000)
+      );
+
       // Prevent agent suicide commands
       const suicidePatterns = [
         /taskkill.*\bnode(\.exe)?\b/i,
@@ -517,7 +576,7 @@ const TOOLS = {
       const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
       try {
         const output = execSync(command, {
-          cwd: workDir, encoding: 'utf8', timeout,
+          cwd: workDir, encoding: 'utf8', timeout: effectiveTimeout,
           maxBuffer: 20 * 1024 * 1024,
           env: { ...process.env, ...env },
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -624,24 +683,9 @@ const TOOLS = {
     },
   },
 
-  // ── Write Multiple Files ────────────────────────────────────────────────────
-  write_files: {
-    description: 'Write multiple files at once — useful for scaffolding projects.',
-    parameters: {
-      files: { type: 'array', required: true, description: 'Array of {path, content} objects' },
-    },
-    async execute({ files }) {
-      if (!Array.isArray(files)) throw new Error('"files" must be an array of {path, content}');
-      const results = [];
-      for (const { path: filePath, content } of files) {
-        const abs = resolve(filePath);
-        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-        await atomicWriteFile(abs, content);
-        results.push(`✓ ${filePath}`);
-      }
-      return `Wrote ${results.length} files:\n${results.join('\n')}`;
-    },
-  },
+  // ── (write_files is defined above with idempotency + per-file error
+  //    isolation. An earlier duplicate definition here shadowed it — removed
+  //    so the robust implementation is the one that actually runs.)
 
   // ── HTTP GET ────────────────────────────────────────────────────────────────
   http_get: {

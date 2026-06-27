@@ -206,12 +206,55 @@ class DeepSeekAgent {
   }
 
   /**
+   * Detect whether an error thrown from a Playwright round-trip means the
+   * page/context/browser was torn down mid-call. Mirrors the classifier used
+   * by DeepSeekBrowser._isNavError but lives here so the agent loop doesn't
+   * reach across module boundaries. When this returns true, the caller can
+   * recreate the tab and retry the iteration instead of crashing the chat.
+   */
+  _isBrowserTeardownError(err) {
+    const msg = String((err && err.message) || err);
+    return /Target page.*closed|Target closed|context or browser has been closed|Browser has been closed|Execution context was destroyed|frame was detached/i.test(msg);
+  }
+
+  /**
+   * Run a browser round-trip (waitForResponse / streamListen / sendMessage)
+   * with one-shot crash recovery. If the call throws a teardown error AND we
+   * haven't already used this run's single recovery, recreate the tab —
+   * replaying the persisted conversation — and retry the call once. Any other
+   * error, or a second teardown, propagates to the caller unchanged.
+   *
+   * This is the safety net that turns a fatal "Target page, context or
+   * browser has been closed" (which previously killed the whole session at
+   * seq 176) into a recoverable blip.
+   */
+  async _browserCallWithCrashRecovery(fn, { tab, sessionId, slog } = {}) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!this._isBrowserTeardownError(err) || this._crashRetried) throw err;
+      this._crashRetried = true;
+      logger.warn(`🔄 Browser round-trip failed ("${err.message}") — recreating tab "${tab}" and retrying once...`);
+      slog?.logWarn('Browser teardown mid-iteration — recreating tab', { tab, error: err.message });
+      try {
+        await this.recreateTab(tab, sessionId);
+      } catch (recErr) {
+        logger.error(`Tab recreate failed: ${recErr.message}`);
+        throw err; // surface the original teardown error
+      }
+      // The recreated tab is fresh; re-issue the original call on it.
+      return await fn();
+    }
+  }
+
+  /**
    * Run a task to completion.
    * Returns the final response string.
    */
   async run(task, options = {}) {
     this._running          = true;
     this._toolCallTracker  = new Map();
+    this._crashRetried     = false; // one-shot browser-teardown recovery per run
     const maxIter          = config.MAX_ITERATIONS;
     const runStart         = Date.now();
 
@@ -306,7 +349,10 @@ class DeepSeekAgent {
     slog?.logRequest(firstMsg, { tab, model, round: 0 });
 
     logger.info(`Sending task to DeepSeek (${tab})...`);
-    await this.browser.sendMessage(firstMsg, tab);
+    await this._browserCallWithCrashRecovery(
+      () => this.browser.sendMessage(firstMsg, tab),
+      { tab, sessionId: persistSessionId, slog }
+    );
 
     // ── 5. Agent loop ───────────────────────────────────────────────────────
     for (let iter = 1; iter <= maxIter; iter++) {
@@ -340,9 +386,12 @@ class DeepSeekAgent {
       slog?.logOrchestration('ITERATION_START', { iter, maxIter, tab, model });
 
       const responseStart = Date.now();
-      const rawResponse   = streamMode
-        ? await this.browser.streamListen(tab, streamEvents)
-        : await this.browser.waitForResponse(tab);
+      const rawResponse   = await this._browserCallWithCrashRecovery(
+        () => (streamMode
+          ? this.browser.streamListen(tab, streamEvents)
+          : this.browser.waitForResponse(tab)),
+        { tab, sessionId: persistSessionId, slog }
+      );
       const responseDurMs = Date.now() - responseStart;
 
       if (!rawResponse || rawResponse.trim().length === 0) {
@@ -350,7 +399,10 @@ class DeepSeekAgent {
         slog?.logWarn('Empty response — retrying', { iter });
         const retryMsg = 'Please continue. If you are waiting for input, proceed with your best judgement.';
         slog?.logRequest(retryMsg, { tab, model, round: iter });
-        await this.browser.sendMessage(retryMsg, tab);
+        await this._browserCallWithCrashRecovery(
+          () => this.browser.sendMessage(retryMsg, tab),
+          { tab, sessionId: persistSessionId, slog }
+        );
         continue;
       }
 
@@ -454,7 +506,10 @@ class DeepSeekAgent {
 
         const feedbackMsg = conversation.addBatchToolResults(combined);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'parallel_batch_result' });
-        await this.browser.sendMessage(feedbackMsg, tab);
+        await this._browserCallWithCrashRecovery(
+          () => this.browser.sendMessage(feedbackMsg, tab),
+          { tab, sessionId: persistSessionId, slog }
+        );
         continue;
       }
 
@@ -497,7 +552,10 @@ class DeepSeekAgent {
         const feedbackMsg = conversation.addToolResult(parsed.name, result, isError);
         slog?.logRequest(feedbackMsg, { tab, model, round: iter, type: 'tool_feedback' });
         persist({ type: 'tool_result', name: parsed.name, result, isError });
-        await this.browser.sendMessage(feedbackMsg, tab);
+        await this._browserCallWithCrashRecovery(
+          () => this.browser.sendMessage(feedbackMsg, tab),
+          { tab, sessionId: persistSessionId, slog }
+        );
         continue;
       }
 
@@ -511,7 +569,10 @@ class DeepSeekAgent {
           true
         );
         slog?.logRequest(recovery, { tab, model, round: iter, type: 'parse_error_recovery' });
-        await this.browser.sendMessage(recovery, tab);
+        await this._browserCallWithCrashRecovery(
+          () => this.browser.sendMessage(recovery, tab),
+          { tab, sessionId: persistSessionId, slog }
+        );
         continue;
       }
 
@@ -533,7 +594,10 @@ class DeepSeekAgent {
             true
           );
           slog?.logRequest(retry, { tab, model, round: iter, type: 'malformed_tool_retry' });
-          await this.browser.sendMessage(retry, tab);
+          await this._browserCallWithCrashRecovery(
+            () => this.browser.sendMessage(retry, tab),
+            { tab, sessionId: persistSessionId, slog }
+          );
           continue;
         }
 

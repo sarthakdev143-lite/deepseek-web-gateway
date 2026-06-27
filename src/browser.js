@@ -125,7 +125,12 @@ class DeepSeekBrowser {
 
   static _isNavError(err) {
     const msg = String(err && err.message || err);
-    return /Execution context was destroyed|Target closed|Navigation|frame was detached/i.test(msg);
+    // Playwright throws several variants when the page/context/browser is
+    // torn down mid-evaluate. The earlier set only matched the literal
+    // "Target closed", so the real "Target page, context or browser has
+    // been closed" error slipped through and crashed the chat loop. Match
+    // the whole family, plus the navigation/context-destroyed cases.
+    return /Execution context was destroyed|Target closed|Target page.*closed|context or browser has been closed|Navigation|frame was detached|Browser has been closed/i.test(msg);
   }
 
   async safeEvaluate(page, fn, ...args) {
