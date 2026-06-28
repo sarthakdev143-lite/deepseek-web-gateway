@@ -308,15 +308,17 @@ const TOOLS = {
       // FIXED: existsSync
       if (!fs.existsSync(abs)) throw new Error(`File not found: ${filePath}`);
 
-      // Build the matcher once; reuse it for the count, uniqueness check, and apply.
-      // Non-regex find is escaped so its special characters are treated literally
-      // (previously the count path re-escaped but the apply path used split/join,
-      // so a find containing regex metacharacters could behave inconsistently).
-      const matcher = use_regex
-        ? new RegExp(find, 'g')
-        : new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+      const before = await fs.promises.readFile(abs, 'utf8');
 
-      const count = (before.match(matcher) || []).length;
+      // Build a single source of truth for the pattern. Non-regex find is escaped
+      // so its special characters are treated literally — previously the count
+      // path and the apply path escaped inconsistently (split/join vs RegExp),
+      // so a find like "v1.2" could match different things in each path.
+      const escapedFind = use_regex ? find : find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const globalMatcher  = new RegExp(escapedFind, 'g');   // /g  — counts & replaces all
+      const firstMatcher   = new RegExp(escapedFind);        // no flag — first match only
+
+      const count = (before.match(globalMatcher) || []).length;
       if (count === 0) {
         return `⚠  No matches found for "${find}" in ${filePath}`;
       }
@@ -332,21 +334,10 @@ const TOOLS = {
         );
       }
 
-      // Apply. For non-bulk, replace only the first match; for bulk, all.
-      const replaced = all_occurrences
-        ? before.replace(matcher, replace)
-        : before.replace(matcher, replace); // matcher already has 'g' flag; for
-
-      // `replace` with a /g flag replaces all occurrences. For first-only we
-      // rebuild a single-match matcher (no 'g' flag) so we touch exactly one.
+      // Apply: bulk replaces all; otherwise exactly the first match.
       const finalContent = all_occurrences
-        ? replaced
-        : before.replace(
-            use_regex
-              ? new RegExp(find)
-              : new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
-            replace
-          );
+        ? before.replace(globalMatcher, replace)
+        : before.replace(firstMatcher, replace);
 
       if (finalContent === before) {
         // Defensive: should be unreachable given count>0, but never no-op silently.
@@ -539,7 +530,11 @@ const TOOLS = {
   // },
 
   run_command: {
-    description: 'Execute a shell command. Runs in the working directory by default.',
+    description: [
+      'Execute a shell command and return its output. BLOCKING — waits for the command to finish.',
+      'Use for builds, tests, migrations, installs. NOT for long-running servers.',
+      'For servers (npm run dev, etc.) use start_server instead, or pass background:true.',
+    ].join(' '),
     parameters: {
       command: { type: 'string', required: true, description: 'Shell command to run' },
       cwd: { type: 'string', required: false, description: 'Working directory' },
@@ -550,9 +545,33 @@ const TOOLS = {
       // which previously killed long installs mid-flight and destabilised
       // the browser-driven chat loop.
       timeout_ms: { type: 'number', required: false, description: 'Alias for timeout (ms)' },
+      // When true, the command runs detached (spawned, not awaited) and the
+      // call returns immediately. Honors the model's `background:true` intent
+      // for long-running processes (dev servers, watchers) instead of silently
+      // dropping it and blocking until the timeout kills the process — which
+      // previously destabilised the gateway and crashed the chat tab.
+      background: { type: 'boolean', required: false, description: 'Run detached (non-blocking). Use for long-running processes like dev servers. Returns immediately with a handle name. Prefer start_server when you know the port.' },
       env: { type: 'object', required: false, description: 'Extra environment variables' },
     },
-    async execute({ command, cwd, timeout, timeout_ms, env = {} }) {
+    async execute({ command, cwd, timeout, timeout_ms, background = false, env = {} }) {
+      // ── Background path: spawn detached, return immediately ──────────────
+      // Honors the `background:true` flag the model emits. Without this, a
+      // `run_command npm run dev` blocked until the timeout then killed the
+      // server — a silent contract violation that destabilised the gateway.
+      if (background) {
+        const handle = TOOLS.start_server.execute({
+          name: `bg_${Date.now().toString(36)}`,
+          command,
+          cwd,
+          // No port → start_server just spawns and confirms the process is alive,
+          // matching the "fire and forget" intent of background:true.
+        });
+        // start_server.execute is async but may reject; surface a clean message.
+        return handle.catch((err) => {
+          throw new Error(`Background command failed to start: ${err.message}`);
+        }).then((r) => typeof r === 'string' ? `${r}\n(running detached — output not captured)` : r);
+      }
+
       // Resolve the effective deadline: prefer an explicit value, fall back
       // to the model-friendly alias, then the default. Clamp to a safe band
       // so a malformed request can't pin a core (too low) or hang forever.

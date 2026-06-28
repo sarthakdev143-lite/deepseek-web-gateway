@@ -881,11 +881,14 @@ class DeepSeekAgent {
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   _workspaceSignature() {
+    // Hash file CONTENT, not mtime+size. See EnhancedOrchestrator._snapshotWorkspace
+    // for rationale: mtime is unreliable (flips on touch, blind to same-mtime
+    // rewrites), which produced false "no filesystem changes detected" warnings.
     try {
       const crypto = require('crypto');
       const files = [];
       const skip = new Set(['.git', 'node_modules', '.seekcode']);
-      
+
       const walk = dir => {
         if (!fs.existsSync(dir)) return;
         const items = fs.readdirSync(dir, { withFileTypes: true });
@@ -896,11 +899,16 @@ class DeepSeekAgent {
             walk(abs);
           } else {
             const stat = fs.statSync(abs);
-            files.push(`${item.name}:${stat.size}:${stat.mtimeMs}`);
+            // Skip huge files (generated artifacts, binaries) to keep this fast;
+            // use size as a stable proxy for those. Source edits are small.
+            const sig = stat.size > 5 * 1024 * 1024
+              ? `size:${stat.size}`
+              : crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex');
+            files.push(`${item.name}:${sig}`);
           }
         }
       };
-      
+
       walk(config.WORKING_DIR);
       return crypto.createHash('sha1').update(files.join(',')).digest('hex');
     } catch {

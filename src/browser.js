@@ -230,51 +230,35 @@ class DeepSeekBrowser {
 
   /**
    * Attach crash and unexpected-close listeners to a Playwright page.
-   * On crash: silently recreate the tab and navigate back to DeepSeek.
+   *
+   * DESIGN: this handler does NOT silently recreate the page. Previously it did,
+   * which raced against agent.js's recreateTab() — both created new pages for the
+   * same tab simultaneously, the browser-level page got destroyed by the
+   * agent-level one, and the resulting frankenstein page had no coherent
+   * conversation state → the model emitted 0-char responses forever (the
+   * 2026-06-27 "zombie loop" hang).
+   *
+   * Instead, this handler just MARKS the tab dead (clears it from the page map)
+   * and lets the in-flight browser round-trip throw a teardown error. That error
+   * is caught by agent.js's _browserCallWithCrashRecovery, which owns the SINGLE
+   * recovery path — including ConversationPersister replay — so there is exactly
+   * one new page per crash, built with full context.
    */
   _attachCrashRecovery(tabName, page) {
-    const recover = async (reason) => {
+    const markDead = (reason) => {
       if (this._closed) return;
-      if (this._crashRecovering.has(tabName)) return; // already recovering
-      this._crashRecovering.add(tabName);
-
-      logger.warn(`⚠️  Page crash/close detected on tab "${tabName}" (${reason}) — auto-recovering...`);
-
-      try {
-        // Discard the dead page
-        this.pages.delete(tabName);
-        this.adaptiveSelectors.delete(tabName);
-
-        // Open a fresh page in the same persistent context
-        const newPage = await this.context.newPage();
-        await newPage.addInitScript(() => {
-          Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        });
-        this.pages.set(tabName, newPage);
-
-        // Re-attach listeners on the new page
-        this._attachCrashRecovery(tabName, newPage);
-
-        // Navigate back and verify login (cookies persist in the context)
-        await this._navigate(config.DEEPSEEK_URL);
-        await newPage.waitForTimeout(2_000);
-        const stillLoggedIn = !(await this._ensureLoggedIn());
-
-        if (stillLoggedIn) {
-          logger.success(`✅  Tab "${tabName}" recovered successfully.`);
-        } else {
-          logger.warn(`Tab "${tabName}" recovered but login was required again.`);
-        }
-      } catch (err) {
-        logger.error(`❌  Recovery failed for tab "${tabName}": ${err.message}`);
-      } finally {
-        this._crashRecovering.delete(tabName);
-      }
+      if (this._crashRecovering.has(tabName)) return; // agent-level recovery owns it now
+      logger.warn(`⚠️  Page crash/close detected on tab "${tabName}" (${reason}) — flagging dead; caller will recreate with replay.`);
+      // Drop the dead page so the next _resolveTab throws a clear "not found"
+      // (surfaced as a teardown error the agent's crash-recovery handles),
+      // rather than a silent zombie. Do NOT create a replacement here.
+      this.pages.delete(tabName);
+      this.adaptiveSelectors.delete(tabName);
     };
 
-    page.on('crash', () => recover('crash'));
+    page.on('crash', () => markDead('crash'));
     // 'close' fires on unexpected closes (not on intentional context.close())
-    page.on('close', () => { if (!this._closed) recover('unexpected close'); });
+    page.on('close', () => { if (!this._closed) markDead('unexpected close'); });
   }
 
   async close() {
