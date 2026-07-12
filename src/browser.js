@@ -257,31 +257,42 @@ class DeepSeekBrowser {
     };
 
     page.on('crash', () => markDead('crash'));
-    // 'close' fires on unexpected closes (not on intentional context.close())
-    page.on('close', () => { if (!this._closed) markDead('unexpected close'); });
-  }
+        // 'close' fires on unexpected closes (not on intentional context.close())
+        page.on('close', () => { if (!this._closed) markDead('unexpected close'); });
+    
+        // Proactive health check - detect stale tabs
+        page._healthCheckInterval = setInterval(() => {
+          if (!this._closed && page.isClosed()) {
+            markDead('health check detected closed');
+          }
+        }, 30000); // Check every 30s
+      }
 
   async close() {
-    if (this._closed) return;
-    this._closed = true;
+      if (this._closed) return;
+      this._closed = true;
 
-    for (const [, page] of this.pages.entries()) {
-      try {
-        if (!page.isClosed()) await page.close();
-      } catch { /* page may already be gone */ }
-    }
-    this.pages.clear();
-    this.adaptiveSelectors.clear();
+      for (const [, page] of this.pages.entries()) {
+        // Clear health check interval
+        if (page._healthCheckInterval) {
+          clearInterval(page._healthCheckInterval);
+        }
+        try {
+          if (!page.isClosed()) await page.close();
+        } catch { /* page may already be gone */ }
+      }
+      this.pages.clear();
+      this.adaptiveSelectors.clear();
 
-    if (this._usesSharedContext) {
+      if (this._usesSharedContext) {
+        this.context = null;
+        await browserPool.release();
+        return;
+      }
+
+      try { await this.context?.close(); } catch { }
       this.context = null;
-      await browserPool.release();
-      return;
     }
-
-    try { await this.context?.close(); } catch { }
-    this.context = null;
-  }
 
   async switchTab(tabName) {
     if (!tabName) return;
@@ -554,37 +565,42 @@ class DeepSeekBrowser {
 
   // ── Sending Messages ───────────────────────────────────────────────────────
 
-  async sendMessage(text, tabName) {
-    const { page } = this._resolveTab(tabName);
-    const { el, isTextarea } = await this._findInput(tabName);
+    async sendMessage(text, tabName) {
+      const { page } = this._resolveTab(tabName);
+      const { el, isTextarea } = await this._findInput(tabName);
 
-    await el.click({ force: true });
-    await page.waitForTimeout(200);
+      // Ensure page is responsive before sending
+      try {
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      } catch {}
 
-    await page.keyboard.press('Control+a');
-    await page.waitForTimeout(100);
+      await el.click({ force: true });
+      await page.waitForTimeout(200);
 
-    if (isTextarea) {
-      await el.fill(text);
-    } else {
-      await this.safeEvaluate(page, (element, content) => {
-        element.focus();
-        document.execCommand('selectAll', false, null);
-        document.execCommand('delete', false, null);
-        document.execCommand('insertText', false, content);
-        element.dispatchEvent(new InputEvent('input', { bubbles: true, data: content }));
-      }, el, text);
+      await page.keyboard.press('Control+a');
+      await page.waitForTimeout(100);
+
+      if (isTextarea) {
+        await el.fill(text);
+      } else {
+        await this.safeEvaluate(page, (element, content) => {
+          element.focus();
+          document.execCommand('selectAll', false, null);
+          document.execCommand('delete', false, null);
+          document.execCommand('insertText', false, content);
+          element.dispatchEvent(new InputEvent('input', { bubbles: true, data: content }));
+        }, el, text);
+      }
+
+      await page.waitForTimeout(config.SEND_DELAY);
+
+      const clicked = await this._clickSendButton(tabName);
+      if (!clicked) {
+        await page.keyboard.press('Enter');
+      }
+
+      await page.waitForTimeout(500);
     }
-
-    await page.waitForTimeout(config.SEND_DELAY);
-
-    const clicked = await this._clickSendButton(tabName);
-    if (!clicked) {
-      await page.keyboard.press('Enter');
-    }
-
-    await page.waitForTimeout(500);
-  }
 
   async _findInput(tabName) {
     const { page, adaptiveSelector } = this._resolveTab(tabName);
@@ -802,8 +818,8 @@ class DeepSeekBrowser {
   // when DeepSeek changes their endpoint.
 
   async streamResponse(tabName, text, onEvent) {
-    const XHR_GRACE_MS = 8000;
-    const { page } = this._resolveTab(tabName);
+      const XHR_GRACE_MS = 30000; // Increased from 8s to 30s for slow-starting streams
+      const { page } = this._resolveTab(tabName);
 
     // Set up listeners BEFORE sending so we don't miss the first chunk.
     const ctx = this._startXhrListener(page, onEvent);
@@ -821,9 +837,9 @@ class DeepSeekBrowser {
   }
 
   /** Listen-only variant — caller has already sent the message via sendMessage(). */
-  async streamListen(tabName, onEvent) {
-    const XHR_GRACE_MS = 8000;
-    const { page } = this._resolveTab(tabName);
+    async streamListen(tabName, onEvent) {
+      const XHR_GRACE_MS = 30000; // Increased from 8s to 30s for slow-starting streams
+      const { page } = this._resolveTab(tabName);
     this._streamSendStart = Date.now(); // anchor for the grace-window fallback
     const ctx = this._startXhrListener(page, onEvent);
     return await this._finishStream(page, tabName, ctx, onEvent, XHR_GRACE_MS);
@@ -832,59 +848,66 @@ class DeepSeekBrowser {
   /** Wire up request/response listeners filtered to the completion endpoint. */
   _startXhrListener(page, onEvent) {
     const COMPLETION_URL_RE = /chat\.deepseek\.com\/api\/v\d+\.\d+\/chat\/completion/;
-    const state = { accumulated: '', captured: false, resolved: false, bodyBuffer: '', requestSeen: false };
+        const state = { accumulated: '', captured: false, resolved: false, bodyBuffer: '', requestSeen: false };
 
-    const onResponse = async (response) => {
-      const url = response.url();
-      if (!COMPLETION_URL_RE.test(url)) return;
-      state.captured = true;
-      try {
-        const body = await response.text();
-        state.bodyBuffer += body;
-        const parsed = this._parseCompletionBody(state.bodyBuffer);
-        if (parsed.text && parsed.text.length > state.accumulated.length) {
-          const delta = parsed.text.slice(state.accumulated.length);
-          state.accumulated = parsed.text;
-          if (onEvent && delta.length > 0) onEvent({ type: 'token', content: delta });
-        }
-        if (parsed.done && !state.resolved) state.resolved = true;
-      } catch (err) {
-        logger.dim(`XHR body read error (non-fatal): ${err.message}`);
-      }
-    };
-    const onRequest = (request) => {
-      if (COMPLETION_URL_RE.test(request.url())) state.requestSeen = true;
-    };
+        let retryCount = 0;
+        const MAX_RETRIES = 3;
+        const RETRY_DELAY = 2000;
 
-    page.on('response', onResponse);
-    page.on('request', onRequest);
+        const onResponse = async (response) => {
+          const url = response.url();
+          if (!COMPLETION_URL_RE.test(url)) return;
+          state.captured = true;
+          try {
+            const body = await response.text().catch(() => '');
+            state.bodyBuffer += body;
+            const parsed = this._parseCompletionBody(state.bodyBuffer);
+            if (parsed.text && parsed.text.length > state.accumulated.length) {
+              const delta = parsed.text.slice(state.accumulated.length);
+              state.accumulated = parsed.text;
+              if (onEvent && delta.length > 0) onEvent({ type: 'token', content: delta });
+            }
+            if (parsed.done && !state.resolved) state.resolved = true;
+          } catch (err) {
+            logger.dim(`XHR body read error (non-fatal): ${err.message}`);
+          }
+        };
+        const onRequest = (request) => {
+          if (COMPLETION_URL_RE.test(request.url())) state.requestSeen = true;
+        };
 
-    const cleanup = () => {
-      try { page.off('response', onResponse); } catch {}
-      try { page.off('request', onRequest); } catch {}
-    };
-    return { state, cleanup };
+        page.on('response', onResponse);
+        page.on('request', onRequest);
+
+        const cleanup = () => {
+          try { page.off('response', onResponse); } catch {}
+          try { page.off('request', onRequest); } catch {}
+        };
+        return { state, cleanup };
   }
 
   /** Wait for the stream to finish (or fall back to DOM polling). */
-  async _finishStream(page, tabName, ctx, onEvent, graceMs) {
-    const { state, cleanup } = ctx;
-    const deadline = Date.now() + (config.RESPONSE_TIMEOUT || 5 * 60_000);
-    let xhrTimedOut = false;
+    async _finishStream(page, tabName, ctx, onEvent, graceMs) {
+        const { state, cleanup } = ctx;
+        const deadline = Date.now() + (config.RESPONSE_TIMEOUT || 30 * 60_000); // 30 min default
+        let xhrTimedOut = false;
+        let retryCount = 0;
+        const MAX_RETRIES = 3;
+        const RETRY_DELAY = 5000;
 
-    while (!state.resolved && Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 200));
-      const elapsed = Date.now() - (this._streamSendStart || Date.now());
-      // Grace-window fallback: no matching XHR observed → bail to DOM polling.
-      if (!state.captured && !state.requestSeen && elapsed > graceMs) {
-        xhrTimedOut = true; break;
+      while (!state.resolved && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+        const elapsed = Date.now() - (this._streamSendStart || Date.now());
+        // Grace-window fallback: no matching XHR observed → bail to DOM polling.
+        if (!state.captured && !state.requestSeen && elapsed > graceMs) {
+          xhrTimedOut = true; break;
+        }
+        // Safety: request seen but no body in 30s → give up on XHR path.
+        if (state.requestSeen && !state.captured && elapsed > 30_000) {
+          xhrTimedOut = true; break;
+        }
       }
-      // Safety: request seen but no body in 30s → give up on XHR path.
-      if (state.requestSeen && !state.captured && elapsed > 30_000) {
-        xhrTimedOut = true; break;
-      }
-    }
-    cleanup();
+      cleanup();
 
     let finalText;
 

@@ -26,7 +26,8 @@ app.use(express.json());
 //  Override with SEEKCODE_REQUEST_TIMEOUT_MS.
 // ─────────────────────────────────────────────────────────────────────────────
 const AUTH_TOKEN = process.env.SEEKCODE_AUTH_TOKEN || '';
-const REQUEST_TIMEOUT_MS = Number(process.env.SEEKCODE_REQUEST_TIMEOUT_MS) || (5 * 60 * 1000);
+// Increased timeouts for long-horizon tasks - streams can run 20+ minutes
+const REQUEST_TIMEOUT_MS = Number(process.env.SEEKCODE_REQUEST_TIMEOUT_MS) || (30 * 60 * 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Project-root allowlist (GUI "Open Project" picker security gate)

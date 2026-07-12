@@ -39,23 +39,23 @@ process.on('unhandledRejection', (reason, promise) => {
 
 class DeepSeekAgent {
 
-  async runWithTimeout(prompt, timeoutMs = 120000, options = {}) {
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error(`Operation timed out after ${timeoutMs}ms`)), timeoutMs)
-    );
+  async runWithTimeout(prompt, timeoutMs = 1800000, options = {}) {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Operation timed out after ${timeoutMs}ms`)), timeoutMs)
+      );
     
-    try {
-      return await Promise.race([this.run(prompt, options), timeoutPromise]);
-    } catch (err) {
-      if (err.message.includes('timed out')) {
-        // Attempt to recover browser state
-        console.warn('Operation timeout - attempting recovery');
-        await this.shutdown().catch(() => {});
-        await this.init();
+      try {
+        return await Promise.race([this.run(prompt, options), timeoutPromise]);
+      } catch (err) {
+        if (err.message.includes('timed out')) {
+          // Attempt to recover browser state
+          console.warn('Operation timeout - attempting recovery');
+          await this.shutdown().catch(() => {});
+          await this.init();
+        }
+        throw err;
       }
-      throw err;
     }
-  }
 
   constructor(options = {}) {
     this.silent        = options.silent || false;
@@ -92,30 +92,30 @@ class DeepSeekAgent {
   }
 
   /**
-   * Background-init: kicks off init() without awaiting it. Callers that need
-   * a ready browser (chat, diagnose, recreateTab) should `await agent.ready()`
-   * first. The ready promise resolves on success or rejects on failure (with
-   * a retry baked in). Used by server.js so /session/create can return
-   * instantly instead of blocking ~7s on Playwright launch.
-   */
-  ensureInit() {
-    if (!this._initPromise) {
-      this._initPromise = (async () => {
-        // One retry — browser launch is occasionally flaky on cold start.
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          try {
-            await this.init();
-            return;
-          } catch (err) {
-            if (attempt === 2) throw err;
-            logger.warn(`Background init attempt ${attempt} failed, retrying: ${err.message}`);
-            await new Promise(r => setTimeout(r, 1000));
+     * Background-init: kicks off init() without awaiting it. Callers that need
+     * a ready browser (chat, diagnose, recreateTab) should `await agent.ready()`
+     * first. The ready promise resolves on success or rejects on failure (with
+     * a retry baked in). Used by server.js so /session/create can return
+     * instantly instead of blocking ~7s on Playwright launch.
+     */
+    ensureInit() {
+      if (!this._initPromise) {
+        this._initPromise = (async () => {
+          // Two retries with exponential backoff — browser launch is occasionally flaky on cold start.
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await this.init();
+              return;
+            } catch (err) {
+              if (attempt === 3) throw err;
+              logger.warn(`Background init attempt ${attempt}/3 failed, retrying in ${attempt * 2}s: ${err.message}`);
+              await new Promise(r => setTimeout(r, attempt * 2000));
+            }
           }
-        }
-      })();
+        })();
+      }
+      return this._initPromise;
     }
-    return this._initPromise;
-  }
 
   /** Await background init if one is in progress; no-op if already ready. */
   ready() {
@@ -167,43 +167,59 @@ class DeepSeekAgent {
   }
 
   /**
-   * Recreate a crashed/closed tab and (optionally) replay the persisted
-   * conversation back into the fresh ConversationManager so the agent retains
-   * context across the crash. `sessionId` should match the one server.js used
-   * for the original run; if omitted, no replay happens (legacy behaviour).
-   */
-  async recreateTab(tab = 'default', sessionId = null) {
-    const page = this.browser.pages.get(tab);
-    if (page && !page.isClosed()) await page.close().catch(() => {});
-    this.browser.pages.delete(tab);
-    this.browser.adaptiveSelectors.delete(tab);
-    await this.browser.switchTab(tab);
-    await this.browser.newChat(tab);
-
-    // Reset this tab's conversation and replay persisted turns (if any).
-    // Re-inject as conversation context — do NOT re-send to the model (the
-    // model has no memory of the prior tab; the next user message will carry
-    // this context forward via buildPrompt's "RECENT CONVERSATION" section).
-    this.conversations.delete(tab);
-    let replayed = 0;
-    if (sessionId) {
-      const history = ConversationPersister.load(sessionId);
-      if (history.length > 0) {
-        logger.info(`Replaying ${history.length} persisted entries into tab "${tab}"...`);
-        const conv = this.conversation; // lazily creates a fresh ConversationManager
-        for (const entry of history) {
-          if (entry.type === 'turn' && (entry.role === 'user' || entry.role === 'assistant')) {
-            conv.addMessage(entry.role, entry.content);
-            replayed++;
-          }
-          // tool_result / final entries are skipped — they're summaries, not
-          // things the model needs to see verbatim in its context window.
+     * Recreate a crashed/closed tab and (optionally) replay the persisted
+     * conversation back into the fresh ConversationManager so the agent retains
+     * context across the crash. `sessionId` should match the one server.js used
+     * for the original run; if omitted, no replay happens (legacy behaviour).
+     */
+    async recreateTab(tab = 'default', sessionId = null) {
+      // Close existing page if any
+      const page = this.browser.pages.get(tab);
+      if (page && !page.isClosed()) {
+        try { await page.close(); } catch {}
+      }
+      this.browser.pages.delete(tab);
+      this.browser.adaptiveSelectors.delete(tab);
+    
+      // Recreate tab with retry logic
+      let lastErr;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this.browser.switchTab(tab);
+          await this.browser.newChat(tab);
+          break; // Success
+        } catch (err) {
+          lastErr = err;
+          logger.warn(`Tab recreate attempt ${attempt}/3 failed: ${err.message}`);
+          if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
         }
       }
-    }
+      if (lastErr) throw lastErr;
 
-    return { tab, recreated: true, replayed };
-  }
+      // Reset this tab's conversation and replay persisted turns (if any).
+      // Re-inject as conversation context — do NOT re-send to the model (the
+      // model has no memory of the prior tab; the next user message will carry
+      // this context forward via buildPrompt's "RECENT CONVERSATION" section).
+      this.conversations.delete(tab);
+      let replayed = 0;
+      if (sessionId) {
+        const history = ConversationPersister.load(sessionId);
+        if (history.length > 0) {
+          logger.info(`Replaying ${history.length} persisted entries into tab "${tab}"...`);
+          const conv = this.conversation; // lazily creates a fresh ConversationManager
+          for (const entry of history) {
+            if (entry.type === 'turn' && (entry.role === 'user' || entry.role === 'assistant')) {
+              conv.addMessage(entry.role, entry.content);
+              replayed++;
+            }
+            // tool_result / final entries are skipped — they're summaries, not
+            // things the model needs to see verbatim in its context window.
+          }
+        }
+      }
+
+      return { tab, recreated: true, replayed };
+    }
 
   /**
    * Detect whether an error thrown from a Playwright round-trip means the

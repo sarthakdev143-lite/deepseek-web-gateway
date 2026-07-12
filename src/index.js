@@ -6,7 +6,7 @@ const path         = require('path');
 const fs           = require('fs');
 const config       = require('./config');
 const logger       = require('./logger');
-const DeepSeekAgent = require('./agent');
+const EnhancedDeepSeekAgent = require('./enhanced-agent');
 
 // ─────────────────────────────────────────────
 //  Parse CLI arguments
@@ -67,26 +67,37 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-\x1b[1mDEEPSEEK AGENT\x1b[0m — AI Coding Agent via Browser Automation
+\x1b[1mENHANCED DEEPSEEK AGENT\x1b[0m — AI Coding Agent with Planning, Memory & Reflection
 
 \x1b[33mUSAGE\x1b[0m
   node src/index.js [OPTIONS] [TASK]
 
 \x1b[33mOPTIONS\x1b[0m
-  -t, --task <task>    Task to run (can also be the last argument without a flag)
-  -i, --interactive    Interactive REPL mode — keep browser open, run multiple tasks
-  -d, --dir <path>     Set working directory (default: current directory)
-  --debug              Verbose debug output
-  --headless           Run browser in headless mode (must be logged in already)
-  --save-log           Save conversation log to ~/.deepseek-agent/logs/
-  --calibrate          Open browser and print DOM info to help fix selectors
-  -h, --help           Show this help
+  -t, --task <task>     Task to run (can also be the last argument without a flag)
+  -i, --interactive     Interactive REPL mode — keep browser open, run multiple tasks
+  -d, --dir <path>      Set working directory (default: current directory)
+  --debug               Verbose debug output
+  --headless            Run browser in headless mode (must be logged in already)
+  --save-log            Save conversation log to ~/.deepseek-agent/logs/
+  --calibrate           Open browser and print DOM info to help fix selectors
+  -h, --help            Show this help
+
+\x1b[33mENHANCED CAPABILITIES (enabled by default)\x1b[0m
+  • Task Planning:     Decomposes complex tasks into subtasks with dependencies
+  • Working Memory:    Summarizes long conversations, keeps key facts accessible
+  • Long-term Memory:  Recalls facts, patterns, and past episodes across sessions
+  • Self-Reflection:   Monitors progress, detects stagnation, pivots strategies
+  • Progress Tracking: Checkpoints progress, resumes from interruptions
+  • Adaptive Iterations: Dynamically adjusts iteration limits by task complexity
+  • Skill Learning:    Extracts reusable procedures from successful executions
+  • Sub-agent Delegation: Spawns parallel workers for independent subtasks
+  • Browser Pool:      Resilient browser management with crash recovery
 
 \x1b[33mEXAMPLES\x1b[0m
-  # Run a single task
-  node src/index.js "Create a REST API in Express with CRUD for users"
+  # Run a single complex task
+  node src/index.js "Create a full-stack todo app with React, Node, and PostgreSQL"
 
-  # Interactive mode (recommended)
+  # Interactive mode (recommended for exploration)
   node src/index.js --interactive
 
   # Run on a specific project directory
@@ -108,7 +119,10 @@ function printHelp() {
   {
     "HEADLESS": true,
     "MAX_ITERATIONS": 50,
-    "STABLE_DELAY": 3000
+    "STABLE_DELAY": 3000,
+    "ENABLE_PLANNING": true,
+    "ENABLE_REFLECTION": true,
+    "REFLECTION_INTERVAL": 5
   }
 `);
 }
@@ -147,7 +161,7 @@ async function main() {
   console.log('');
 
   // ── Create agent ───────────────────────────────────────────────────────────
-  const agent = new DeepSeekAgent({ saveLog: opts.saveLog });
+    const agent = new EnhancedDeepSeekAgent({ saveLog: opts.saveLog });
 
   // ── Graceful shutdown handler ──────────────────────────────────────────────
   const shutdown = async (code = 0) => {
