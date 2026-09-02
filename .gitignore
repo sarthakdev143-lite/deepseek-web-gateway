@@ -46,4 +46,6 @@ build/
 out/
 
 codebase.txt
-package-lock.json
+
+# NOTE: package-lock.json is intentionally NOT ignored.
+# A committed lockfile is what makes installs reproducible for contributors.
