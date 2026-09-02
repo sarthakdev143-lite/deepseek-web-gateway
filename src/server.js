@@ -10,7 +10,9 @@ const { createSessionLogger } = require('./session-logger');
 const { ConversationPersister } = require('./conversation-persister');
 
 const app = express();
-app.use(express.json());
+// 25MB: orchestrator prompts carry file contents and the 100KB express default
+// rejected them with an opaque 413.
+app.use(express.json({ limit: process.env.SEEKCODE_MAX_BODY || '25mb' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Security configuration (Phase 6c)
@@ -37,22 +39,29 @@ const REQUEST_TIMEOUT_MS = Number(process.env.SEEKCODE_REQUEST_TIMEOUT_MS) || (5
 //  run_command — can only be pointed at approved project directories.
 // ─────────────────────────────────────────────────────────────────────────────
 const pathLib = require('path');
+const crypto = require('crypto');
 const PROJECT_ROOTS = require('./config').PROJECT_ROOTS || [];
+const { checkPath } = require('./path-guard');
 
-/** Resolve `target` absolute; return true if it equals or is a child of any
- *  configured root. Empty roots array = open mode (allow all). */
+/**
+ * True if `target` is inside the allowlist. Delegates to the shared path guard
+ * so the HTTP layer and the tool layer cannot disagree — and so both get
+ * symlink resolution and Windows case-insensitivity, which the previous local
+ * string-prefix implementation lacked (`D:\allowed-sibling` passed a
+ * `D:\allowed` prefix test).
+ */
 function isWithinRoots(target) {
   if (!PROJECT_ROOTS.length) return true; // dev/open mode
   if (!target) return false;
-  try {
-    const abs = pathLib.resolve(target);
-    return PROJECT_ROOTS.some((root) => {
-      const rootAbs = pathLib.resolve(root);
-      return abs === rootAbs || abs.startsWith(rootAbs + pathLib.sep);
-    });
-  } catch {
-    return false;
-  }
+  return checkPath(target, PROJECT_ROOTS).allowed;
+}
+
+/** Length-safe constant-time string comparison. */
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 // Token-auth middleware. Exempts /health (liveness probes must work unauth'd).
@@ -63,7 +72,7 @@ function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
   const queryToken = req.query && req.query.token ? String(req.query.token) : '';
-  if (bearer === AUTH_TOKEN || queryToken === AUTH_TOKEN) return next();
+  if (safeEqual(bearer, AUTH_TOKEN) || safeEqual(queryToken, AUTH_TOKEN)) return next();
 
   logger.warn(`Auth rejected: ${req.method} ${req.path} from ${req.ip}`);
   return res.status(401).json({ error: 'Unauthorized — provide Authorization: Bearer <token> or ?token=<token>' });
@@ -581,10 +590,37 @@ process.on('SIGINT', async () => {
 
 const PORT = process.env.PORT || 8080;
 const config = require('./config');
-app.listen(PORT, () => {
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Bind host — loopback by default.
+//
+//  This process can execute arbitrary shell commands on behalf of the model.
+//  Previously it bound 0.0.0.0 with auth disabled by default, which exposed
+//  that capability to every device on the local network. Loopback is now the
+//  default, and exposing it beyond loopback REQUIRES an auth token — we fail
+//  closed rather than start an unauthenticated remote shell.
+// ─────────────────────────────────────────────────────────────────────────────
+const HOST = process.env.SEEKCODE_HOST || process.env.HOST || '127.0.0.1';
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+
+if (!LOOPBACK.has(HOST) && !AUTH_TOKEN) {
+  console.error('═'.repeat(55));
+  console.error('  REFUSING TO START');
+  console.error(`  Host "${HOST}" is not loopback and no auth token is set.`);
+  console.error('  This server executes shell commands — binding it to a');
+  console.error('  reachable interface without auth would expose your machine.');
+  console.error('');
+  console.error('  Either:');
+  console.error('    set SEEKCODE_AUTH_TOKEN=<a long random string>');
+  console.error('    or unset SEEKCODE_HOST to bind 127.0.0.1 only');
+  console.error('═'.repeat(55));
+  process.exit(1);
+}
+
+app.listen(PORT, HOST, () => {
   console.log('═'.repeat(55));
   console.log('  DeepSeek Web Gateway — HTTP API');
-  console.log(`  Listening on http://localhost:${PORT}`);
+  console.log(`  Listening on http://${HOST}:${PORT}`);
   console.log('  Endpoints:');
   console.log('    GET  /health               — health check');
   console.log('    GET  /sessions             — list active sessions');
@@ -598,13 +634,20 @@ app.listen(PORT, () => {
   console.log('    GET  /directories/list     — list subdirs (GUI folder tree)');
   console.log('─'.repeat(55));
   console.log('  Security:');
-  console.log('    Auth: ' + (AUTH_TOKEN ? 'ENABLED (Bearer token required)' : 'DISABLED — set SEEKCODE_AUTH_TOKEN in production'));
+  console.log(`    Bind host: ${HOST}${LOOPBACK.has(HOST) ? ' (loopback only)' : ' (NETWORK-REACHABLE)'}`);
+  console.log('    Auth: ' + (AUTH_TOKEN ? 'ENABLED (Bearer token required)' : 'disabled (loopback-only dev mode)'));
+  console.log('    File access: ' + (
+    PROJECT_ROOTS.length
+      ? `restricted to ${PROJECT_ROOTS.length} root(s): ${PROJECT_ROOTS.join(', ')}`
+      : 'UNRESTRICTED — set SEEKCODE_PROJECT_ROOTS to confine writes'
+  ));
   console.log(`    Non-stream request timeout: ${REQUEST_TIMEOUT_MS}ms`);
   console.log(`    Agent wall-clock budget: ${Math.floor((config.RUN_BUDGET_MS || 0) / 60_000)}min (SEEKCODE_RUN_BUDGET_MS)`);
   console.log('═'.repeat(55));
-  if (!AUTH_TOKEN) {
-    console.log('  ⚠️  WARNING: no auth token set. Anyone who can reach this port can');
-    console.log('      drive a browser that executes shell commands. Set SEEKCODE_AUTH_TOKEN.');
+  if (!PROJECT_ROOTS.length) {
+    console.log('  NOTE: no project roots configured. The agent can read and write');
+    console.log('        anywhere this user account can. Set SEEKCODE_PROJECT_ROOTS');
+    console.log('        to confine it to your code directories.');
     console.log('═'.repeat(55));
   }
 });
