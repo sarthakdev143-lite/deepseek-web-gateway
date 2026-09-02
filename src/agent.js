@@ -24,13 +24,45 @@ const {
   readFileInline,
   uploadSuccessMessage,
 }                                   = require('./read-file-delivery');
+const { assertWithinRoots }         = require('./path-guard');
+const runContext                    = require('./run-context');
+
+/** Working directory for the current run (falls back to global config). */
+function currentWorkingDir() {
+  const ctx = runContext.current();
+  return (ctx && ctx.workingDir) || config.WORKING_DIR;
+}
+
+/**
+ * Resolve an agent-supplied path with PROJECT_ROOTS containment applied.
+ *
+ * Some tool branches in _executeToolCore resolve paths themselves rather than
+ * delegating to tools.js, so they need the same guard — otherwise they are a
+ * bypass around the allowlist.
+ */
+function resolveGuarded(filePath) {
+  const absolute = path.isAbsolute(filePath)
+    ? filePath
+    : path.resolve(currentWorkingDir(), filePath);
+  return assertWithinRoots(absolute, config.PROJECT_ROOTS);
+}
 
 // Global error boundary for agent.js
-process.on('unhandledRejection', (reason, promise) => {
-  // Defer handling to main orchestrator or ignore non-fatal resets
-  if (reason.message?.includes('browser') || reason.message?.includes('context')) {
-    logger.warn('🔄 Agent rejection caught in global boundary: ' + reason.message);
+process.on('unhandledRejection', (reason) => {
+  // `reason` is not guaranteed to be an Error — a bare `Promise.reject()`
+  // yields undefined, and `reason.message` then throws inside the handler,
+  // escalating a swallowed rejection into an uncaught exception.
+  const message = reason instanceof Error
+    ? reason.message
+    : String(reason && reason.message ? reason.message : reason);
+
+  if (message.includes('browser') || message.includes('context')) {
+    logger.warn('🔄 Agent rejection caught in global boundary: ' + message);
+    return;
   }
+
+  // Previously every other rejection was silently discarded, hiding real bugs.
+  logger.error('Unhandled promise rejection in agent: ' + message);
 });
 
 // ─────────────────────────────────────────────
@@ -63,9 +95,9 @@ class DeepSeekAgent {
     this.conversations = new Map(); // tabName -> ConversationManager
     this.options       = options;
     this._running      = false;
-    this.sandbox           = null; // Will be initialized on first command execution
     this.sessionLogger     = null; // Set per-run from options or module singleton
-    this._toolCallTracker  = new Map(); // fingerprint -> { count, uploadStubCount }
+    this._toolCallTracker     = new Map(); // fingerprint -> { count, uploadStubCount }
+    this._loopStallDetector    = null;     // tracks consecutive empty/no-change iterations
   }
 
   get conversation() {
@@ -124,14 +156,6 @@ class DeepSeekAgent {
 
   /** Shut down cleanly */
   async shutdown() {
-    // Clean up sandbox if it exists
-    if (this.sandbox) {
-      try {
-        await this.sandbox.cleanup();
-      } catch (err) {
-        logger.warn(`Sandbox cleanup failed: ${err.message}`);
-      }
-    }
     // Clean up background servers started by the agent
     try {
       const { stopAllServers } = require('./tools');
@@ -144,7 +168,7 @@ class DeepSeekAgent {
 
   async diagnose(tab = 'default') {
     await this.browser.switchTab(tab);
-    const artifactDir = path.join(config.WORKING_DIR || process.cwd(), '.seekcode', 'diagnostics');
+    const artifactDir = path.join(currentWorkingDir() || process.cwd(), '.seekcode', 'diagnostics');
     fs.mkdirSync(artifactDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const screenshotPath = path.join(artifactDir, `${stamp}-${tab}-screenshot.png`);
@@ -251,10 +275,32 @@ class DeepSeekAgent {
    * Run a task to completion.
    * Returns the final response string.
    */
+  /**
+   * Public entry point. Establishes a per-run context so concurrent sessions
+   * cannot clobber each other's workingDir / readOnly settings, then delegates
+   * to the real loop.
+   */
   async run(task, options = {}) {
+    return runContext.runWith(
+      {
+        workingDir: options.workingDir || config.WORKING_DIR,
+        readOnly: Boolean(options.readOnly),
+      },
+      () => this._runInner(task, options)
+    );
+  }
+
+  async _runInner(task, options = {}) {
     this._running          = true;
     this._toolCallTracker  = new Map();
     this._crashRetried     = false; // one-shot browser-teardown recovery per run
+
+    // ── Loop-stall detector: consecutive empty / identical-response iterations ─
+    // Without this, a stuck model can burn the full 999-iteration budget emitting
+    // 0-char responses / the same parse-error retry / the same tool call forever,
+    // generating no useful progress while consuming hours of wall-clock time.
+    // Bump: counter resets on any new tool call or non-empty final response.
+    this._loopStallDetector = { emptyCount: 0, sameToolCount: 0, lastToolFingerprint: '', lastResponseLen: 0 };
     const maxIter          = config.MAX_ITERATIONS;
     const runStart         = Date.now();
 
@@ -302,17 +348,19 @@ class DeepSeekAgent {
 
     // ── 1. Apply per-session working directory ──────────────────────────────
     if (options.workingDir) {
-      config.WORKING_DIR = options.workingDir;
+      // No global mutation: the value already lives in this run's
+      // AsyncLocalStorage context (see run()), so concurrent sessions each keep
+      // their own working directory.
       slog?.logInfo(`Working directory set to: ${options.workingDir}`);
     }
 
     // ── 1b. Apply read-only mode ────────────────────────────────────────────
+    // The flag is carried in this run's context (see run()), so it cannot be
+    // cleared by a concurrent writable session — which is exactly what the old
+    // global setReadOnly(false) reset did.
     if (options.readOnly) {
-      setReadOnly(true);
       logger.warn('⛔ Read-only mode active — write/command tools are blocked.');
       slog?.logOrchestration('READ_ONLY_MODE', { active: true });
-    } else {
-      setReadOnly(false); // reset in case last session had it enabled
     }
 
     // ── 2. Switch tab / model ───────────────────────────────────────────────
@@ -395,8 +443,18 @@ class DeepSeekAgent {
       const responseDurMs = Date.now() - responseStart;
 
       if (!rawResponse || rawResponse.trim().length === 0) {
-        logger.warn('Empty response received — retrying...');
-        slog?.logWarn('Empty response — retrying', { iter });
+        this._loopStallDetector.emptyCount++;
+        const stallCap = 5;
+        if (this._loopStallDetector.emptyCount >= stallCap) {
+          const msg = `⛔ Loop stall detected: ${stallCap} consecutive empty responses. Ending run to prevent zombie loop.`;
+          logger.warn(msg);
+          slog?.logWarn('Loop stall — consecutive empty responses', { stallCap, iter });
+          persist({ type: 'stall', reason: 'consecutive_empty_responses', iterations: iter });
+          this._running = false;
+          return msg;
+        }
+        logger.warn(`Empty response received (${this._loopStallDetector.emptyCount}/${stallCap}) — retrying...`);
+        slog?.logWarn('Empty response — retrying', { iter, emptyCount: this._loopStallDetector.emptyCount });
         const retryMsg = 'Please continue. If you are waiting for input, proceed with your best judgement.';
         slog?.logRequest(retryMsg, { tab, model, round: iter });
         await this._browserCallWithCrashRecovery(
@@ -411,6 +469,10 @@ class DeepSeekAgent {
 
       // Record in conversation history
       conversation.addAssistantMessage(rawResponse);
+
+      // Reset stall detector on a substantive response (non-empty)
+      this._loopStallDetector.emptyCount = 0;
+      this._loopStallDetector.lastResponseLen = rawResponse.length;
 
       // Parse the response
       const parsed = parseResponse(rawResponse);
@@ -763,9 +825,30 @@ class DeepSeekAgent {
   async _executeToolSafely(toolName, args) {
     const tab = this.browser.activeTab || 'default';
 
+    // ── Tool execution timeout — prevent indefinite hangs in any tool path ────
+    const TOOL_TIMEOUT_MS = config.TOOL_TIMEOUT_MS || 5 * 60_000;
+    const toolPromise = this._executeToolCore(toolName, args, tab);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Tool "${toolName}" timed out after ${TOOL_TIMEOUT_MS / 1000}s`)), TOOL_TIMEOUT_MS)
+    );
+
+    try {
+      return await Promise.race([toolPromise, timeoutPromise]);
+    } catch (err) {
+      if (err.message.includes('timed out')) {
+        logger.warn(`⏱️  Tool "${toolName}" timed out (${TOOL_TIMEOUT_MS / 1000}s).`);
+      }
+      throw err;
+    }
+  }
+
+  async _executeToolCore(toolName, args, tab) {
+
     if (toolName === 'upload_file') {
       const { path: filePath } = args;
-      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(config.WORKING_DIR, filePath);
+      // Guarded resolve: this branch handles the path itself instead of going
+      // through tools.js, so it must apply the same PROJECT_ROOTS containment.
+      const absPath = resolveGuarded(filePath);
       if (!fs.existsSync(absPath)) {
         throw new Error(`File not found: ${filePath}`);
       }
@@ -789,7 +872,7 @@ class DeepSeekAgent {
     
     if (toolName === 'read_file') {
       const { path: filePath, start_line, end_line } = args;
-      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(config.WORKING_DIR, filePath);
+      const absPath = resolveGuarded(filePath);
 
       if (shouldNeverUpload(filePath)) {
         logger.info(`Returning inline (redacted) read for sensitive file: ${filePath}`);
@@ -833,49 +916,18 @@ class DeepSeekAgent {
       return inlineResult;
     }
 
-    if (toolName !== 'run_command') {
-      return await executeTool(toolName, args);
-    }
-
-    const { command, cwd, timeout, env } = args;
-    
-    let SecuritySandbox;
-    try {
-      SecuritySandbox = require('./security/SecuritySandbox').SecuritySandbox;
-    } catch (err) {
-      logger.warn('⚠️ Security sandbox not available. Commands run directly on host (unsafe).');
-      return await executeTool(toolName, args);
-    }
-
-    if (!this.sandbox) {
-      logger.info('Initializing security sandbox...');
-      this.sandbox = new SecuritySandbox({
-        policy: config.SECURITY_POLICY || {
-          approvalRequired: { delete: true, writeOutsideProject: true, network: true, shell: true, install: true },
-          allowNetwork: false,
-        },
-        docker: {
-          image: config.DOCKER_IMAGE || 'node:20-alpine',
-          memory: config.DOCKER_MEMORY || '512m',
-          network: config.ALLOW_NETWORK ? 'bridge' : 'none',
-          timeout: config.COMMAND_TIMEOUT || 60000,
-        },
-      });
-    }
-
-    try {
-      logger.dim(`[Sandbox] Executing: ${command.slice(0, 100)}`);
-      const result = await this.sandbox.execute(command, { cwd, env, timeout });
-      
-      let output = result.stdout;
-      if (result.stderr) output += '\n\nSTDERR:\n' + result.stderr;
-      if (!result.sandboxed) {
-        output += '\n\n⚠️ WARNING: Command ran on host (Docker unavailable). Install Docker for sandboxing.';
-      }
-      return output || '(command completed with no output)';
-    } catch (err) {
-      throw new Error(`Sandbox execution failed: ${err.message}`);
-    }
+    // NOTE ON SANDBOXING
+    //
+    // This previously tried to require('./security/SecuritySandbox'), a module
+    // that does not exist in this package. The require threw on every single
+    // run_command, logged "sandbox not available", and fell through to host
+    // execution — i.e. it was pure overhead that also implied a protection
+    // boundary that was never there.
+    //
+    // Commands run on the host, confined by PROJECT_ROOTS (see path-guard.js)
+    // and the read-only guard in tools.js. Real process isolation is a
+    // deliberate future feature, not something to imply in a log line.
+    return await executeTool(toolName, args);
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -909,7 +961,7 @@ class DeepSeekAgent {
         }
       };
 
-      walk(config.WORKING_DIR);
+      walk(currentWorkingDir());
       return crypto.createHash('sha1').update(files.join(',')).digest('hex');
     } catch {
       return '';
@@ -939,7 +991,7 @@ class DeepSeekAgent {
           if (entries.length >= maxEntries) return;
           if (item.name.startsWith(".") || excluded.has(item.name)) continue;
           if (item.name.endsWith(".lock")) continue;
-          const relPath = path.relative(config.WORKING_DIR, path.join(dir, item.name));
+          const relPath = path.relative(currentWorkingDir(), path.join(dir, item.name));
           entries.push((item.isDirectory() ? relPath + "/" : relPath));
           if (item.isDirectory()) {
             walk(path.join(dir, item.name), depth + 1);
@@ -947,7 +999,7 @@ class DeepSeekAgent {
         }
       }
 
-      walk(config.WORKING_DIR, 1);
+      walk(currentWorkingDir(), 1);
       return entries.length > 0 ? entries.join("\n") : "(empty directory)";
     } catch {
       return "(could not read directory)";
@@ -965,7 +1017,7 @@ class DeepSeekAgent {
         `DeepSeek Agent — Session Log`,
         `Date: ${new Date().toISOString()}`,
         `Task: ${task}`,
-        `Working Dir: ${config.WORKING_DIR}`,
+        `Working Dir: ${currentWorkingDir()}`,
         '═'.repeat(60),
         this.conversation.exportLog(),
         '',
