@@ -7,6 +7,8 @@ const config = require('./config');
 // Secret redaction — inlined in ./utils so the gateway is self-contained
 // (previously reached across into the sibling `seekcode` package).
 const { redact } = require('./utils');
+const { assertWithinRoots } = require('./path-guard');
+const runContext = require('./run-context');
 
 /** Full-file reads above this line count may use DeepSeek attachment upload. */
 const UPLOAD_LINE_THRESHOLD = 150;
@@ -18,9 +20,11 @@ const UPLOAD_DENY_EXTENSIONS = new Set(['.pem', '.key', '.p12', '.pfx', '.crt', 
 const UPLOAD_DENY_BASENAMES  = /^\.env(\..+)?$/i;
 
 function resolveAbs(filePath) {
-  return path.isAbsolute(filePath)
-    ? filePath
-    : path.resolve(config.WORKING_DIR, filePath);
+  const ctx = runContext.current();
+  const base = (ctx && ctx.workingDir) || config.WORKING_DIR;
+  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(base, filePath);
+  // Inline reads bypass tools.js, so apply the allowlist here too.
+  return assertWithinRoots(absolute, config.PROJECT_ROOTS);
 }
 
 function shouldNeverUpload(filePath) {

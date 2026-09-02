@@ -8,16 +8,41 @@ const { execSync } = require('child_process');
 const http = require('http');
 const https = require('https');
 const config = require('./config');
+const { assertWithinRoots } = require('./path-guard');
+const runContext = require('./run-context');
+
+/**
+ * Working directory for the current run.
+ * Prefers the per-run AsyncLocalStorage context so concurrent sessions do not
+ * share (and overwrite) one global. Falls back to config for non-run callers.
+ */
+function currentWorkingDir() {
+  const ctx = runContext.current();
+  return (ctx && ctx.workingDir) || config.WORKING_DIR;
+}
 
 // ── Read-only mode guard ───────────────────────────────────────────
 let _readOnly = false;
 const MUTATION_TOOLS = new Set([
   'write_file', 'write_files', 'replace_in_file', 'append_to_file', 'delete_file',
   'move_file', 'copy_file', 'run_command', 'start_server',
+  // create_directory mutates the filesystem too — it was missing, so
+  // --read-only sessions could still create directories.
+  'create_directory',
 ]);
 
 function setReadOnly(val) { _readOnly = Boolean(val); }
-function isReadOnly()     { return _readOnly; }
+
+/**
+ * Read-only state for the current run.
+ * The per-run context wins when present: a read-only session must stay
+ * read-only even if a concurrent writable session is running.
+ */
+function isReadOnly() {
+  const ctx = runContext.current();
+  if (ctx && typeof ctx.readOnly === 'boolean') return ctx.readOnly;
+  return _readOnly;
+}
 
 
 const activeServers = new Map(); // name -> { proc, port, command, workDir, getLogs }
@@ -44,13 +69,27 @@ function truncate(str, max = config.MAX_OUTPUT_LENGTH) {
   );
 }
 
+/**
+ * Resolve an agent-supplied path AND enforce the PROJECT_ROOTS allowlist.
+ *
+ * Enforcement lives here because this is the single chokepoint every
+ * filesystem tool goes through. Previously this function returned absolute
+ * paths verbatim and resolved `..` freely against WORKING_DIR, which meant the
+ * allowlist checked at /session/create had no effect on the tools it existed to
+ * constrain. Throwing here surfaces the refusal to the agent as a tool error.
+ *
+ * @throws {Error} EPATHNOTALLOWED when the path escapes PROJECT_ROOTS
+ */
 function resolve(filePath) {
   let p = filePath;
   if (process.platform === 'win32' && p && p.includes(' ')) {
     p = p.replace(/^["']|["']$/g, '');
   }
-  if (path.isAbsolute(p)) return p;
-  return path.resolve(config.WORKING_DIR, p);
+
+  const absolute = path.isAbsolute(p) ? p : path.resolve(currentWorkingDir(), p);
+
+  // Open mode (no roots configured) still resolves, just without containment.
+  return assertWithinRoots(absolute, config.PROJECT_ROOTS);
 }
 
 function formatBytes(bytes) {
@@ -592,7 +631,7 @@ const TOOLS = {
         throw new Error(`Security Error: Command rejected. Attempting to kill Node.js processes globally (${command}) would terminate the SeekCode agent and gateway processes. Please kill the target application by its specific port or PID instead, or use the start_server/stop_server tools.`);
       }
 
-      const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
+      const workDir = cwd ? resolve(cwd) : currentWorkingDir();
       try {
         const output = execSync(command, {
           cwd: workDir, encoding: 'utf8', timeout: effectiveTimeout,
@@ -744,7 +783,7 @@ const TOOLS = {
     },
     async execute({ name, command, cwd, port, ready_timeout = 15000 }) {
       const { spawn } = require('child_process');
-      const workDir = cwd ? resolve(cwd) : config.WORKING_DIR;
+      const workDir = cwd ? resolve(cwd) : currentWorkingDir();
 
       if (activeServers.has(name)) {
         const old = activeServers.get(name);
@@ -876,15 +915,15 @@ const TOOLS = {
     async execute({ path: filePath }) {
       try {
         // The index is written relative to the working directory
-        const indexFile = path.join(config.WORKING_DIR, '.seekcode', 'index.json');
+        const indexFile = path.join(currentWorkingDir(), '.seekcode', 'index.json');
         if (!fs.existsSync(indexFile)) {
           return `⚠ Symbol index not found at ${indexFile}. The project may not have been analyzed yet.`;
         }
         const index = JSON.parse(await fs.promises.readFile(indexFile, 'utf8'));
 
         // Normalise the requested path to a project-relative key
-        const abs = path.isAbsolute(filePath) ? filePath : path.resolve(config.WORKING_DIR, filePath);
-        const rel = path.relative(config.WORKING_DIR, abs).replace(/\\/g, '/');
+        const abs = path.isAbsolute(filePath) ? filePath : path.resolve(currentWorkingDir(), filePath);
+        const rel = path.relative(currentWorkingDir(), abs).replace(/\\/g, '/');
 
         const entry = index.files?.[rel];
         if (!entry) {
