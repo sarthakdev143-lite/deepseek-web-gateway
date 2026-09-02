@@ -1,14 +1,18 @@
 {
   "name": "deepseek-web-gateway",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Local HTTP server that drives the free DeepSeek web chat UI via Playwright and runs an agent tool-calling loop. No API key required.",
   "main": "src/index.js",
   "license": "MIT",
   "author": "Sarthak Parulekar",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sarthakdev143-lite/deepseek-web-gateway.git"
+    "url": "git+https://github.com/sarthakdev143-lite/deepseek-web-gateway.git"
   },
+  "bugs": {
+    "url": "https://github.com/sarthakdev143-lite/deepseek-web-gateway/issues"
+  },
+  "homepage": "https://github.com/sarthakdev143-lite/deepseek-web-gateway#readme",
   "keywords": [
     "deepseek",
     "ai-agent",
